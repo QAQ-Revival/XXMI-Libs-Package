@@ -11,6 +11,7 @@
 //  HackerContext <- ID3D11DeviceContext1 <- ID3D11DeviceContext <- ID3D11DeviceChild <- IUnknown
 
 #include "Hunting.h"
+#include "IniHandler.h"
 
 //#include "HookedContext.h"
 
@@ -3102,8 +3103,9 @@ void HackerContext::InitIniParams()
 	// We don't consider persistent globals set in the [Constants] pre
 	// command list as making the user config file dirty, because this
 	// command list includes the user config file's [Constants] itself.
-	G->user_config_dirty = false;
+	ResetPersistentTracking();
 	RunCommandList(mHackerDevice, this, &G->post_constants_command_list, NULL, true);
+	InitializeActivityChannel();
 
 	// Only want to run [Constants] on initial load and config reload. In
 	// some games we see additional DirectX devices & contexts being

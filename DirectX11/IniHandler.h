@@ -5,8 +5,13 @@ void ToggleInput(HackerDevice *device, void *private_data);
 void LoadConfigFile();
 void ReloadConfig(HackerDevice *device);
 void RegisterUnknownSetting(const wchar_t* name, float value);
-bool SavePersistentSettings(bool force = false);
-bool SaveUnknownPersistentSettings();
+class CommandListVariable;
+void MarkPersistentVariableDirty(CommandListVariable* var);
+void ResetPersistentTracking();
+void ResetActivityChannel();
+void InitializeActivityChannel();
+void PublishActivityChannel();
+bool SavePersistentSettings(bool force = false, bool incremental = false);
 
 struct IniLine {
 	// Same syntax as std::pair, whitespace stripped around each:

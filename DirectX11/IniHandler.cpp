@@ -22,6 +22,8 @@
 #include <locale>
 #include <cmath>
 
+#include "QaqrRuntime.inc"
+
 #define INI_FILENAME L"d3dx.ini"
 
 // List all the section prefixes which may contain a command list here and
@@ -606,8 +608,11 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 		// here, at least not without auditing most of the d3dx.ini
 		// files already in the wild. Let's at least try not to add any
 		// new syntax that includes semicolons anyway!)
-		if (wline[0] == L';')
+		if (wline[0] == L';') {
+			if (ini_path == G->user_config && wline == L"; QAQR incremental update")
+				persistent_journal_dirty = true;
 			continue;
+		}
 
 		// Section?
 		if (wline[0] == L'[') {
@@ -2411,6 +2416,8 @@ static void ParseConstantsSection()
 	// 3dvision2sbs mode, but still ensures that setting the variable will
 	// throw an error if 3dvision2sbs.ini was not included.
 
+	ResetActivityChannel();
+	dirty_persistent_variables.clear();
 	command_list_globals.clear();
 	persistent_variables.clear();
 	GetIniSection(&section, L"Constants");
@@ -5005,84 +5012,44 @@ static void ShowUnknownSettingsNotification()
 		LogWarningW(L"Unrecognised persistent variable: %ls = %f\n", entry.first.c_str(), entry.second);
 }
 
-// Save the currently known persistent variables to d3dx_user.ini.
-// Unknown variables are handled separately by HandleUnknownPersistentSettings():
-// they are discovered by LoadConfigFile() after this function runs and may be
-// appended back to the file separately.
-bool SavePersistentSettings(bool force)
+// Periodic saves only append net changes. Reloads compact the ordered journal
+// using atomic replacement, including unknown settings in the same transaction.
+bool SavePersistentSettings(bool force, bool incremental)
 {
+	std::lock_guard<std::recursive_mutex> lock(persistent_mutex);
 	G->gSettingsSaveTime = G->gTime;
-
-	if (!G->user_config_dirty && !force)
-		return false;
+	if (!force && (!G->user_config_dirty || !HasPersistentChanges())) return false;
+	if (incremental) return SaveIncrementalSettings();
 
 	setlocale(LC_CTYPE, "en_US.UTF-8");
-
-	// TODO: Ability to update existing file rather than overwriting:
-	//wfopen_ensuring_access(&f, G->user_config.c_str(), L"r+");
-	//if (!f)
-
-	FILE* f;
-	wfopen_ensuring_access(&f, G->user_config.c_str(), L"w");
-	if (!f)
-	{
-		LogWarning("Unable to save settings in %S\n", G->user_config.c_str());
+	const std::wstring temporary = G->user_config + L".qaqr-tmp-" + std::to_wstring(GetCurrentProcessId());
+	FILE* file = NULL;
+	_wfopen_s(&file, temporary.c_str(), L"w");
+	if (!file) {
 		setlocale(LC_CTYPE, G->gDefaultLocale.c_str());
 		return false;
 	}
-
-	LogInfo("Saving user settings to %S\n", G->user_config.c_str());
-
-	fputs("; AUTOMATICALLY GENERATED FILE - DO NOT EDIT\n"
-	      ";\n"
-	      "; 3DMigoto will overwrite this file whenever any persistent settings are\n"
-	      "; altered by hot key or command list. Tag global variables with the \"persist\"\n"
-	      "; keyword to save them in this file. Use the post keyword in the [Constants]\n"
-	      "; command list if you need to do any intialisation after this file is loaded.\n"
-	      ";\n"
-	      "[Constants]\n", f);
-
-	for (auto global : persistent_variables)
-		fprintf_s(f, "%ls = %.9g\n", global->name.c_str(), global->fval);
-
+	fputs("; AUTOMATICALLY GENERATED FILE - DO NOT EDIT\n[Constants]\n", file);
+	std::vector<std::pair<CommandListVariable*, float>> values;
+	values.reserve(persistent_variables.size());
+	for (auto var : persistent_variables) {
+		const float value = var->fval;
+		fprintf_s(file, "%ls = %.9g\n", var->name.c_str(), value);
+		values.emplace_back(var, value);
+	}
+	for (const auto& entry : unknown_variables)
+		fprintf_s(file, "%ls = %.9g\n", entry.first.c_str(), entry.second);
+	const bool written = !ferror(file) && fflush(file) == 0 && _commit(_fileno(file)) == 0;
+	const bool closed = fclose(file) == 0;
+	const bool saved = written && closed && MoveFileExW(temporary.c_str(), G->user_config.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+	if (!saved) DeleteFileW(temporary.c_str());
+	setlocale(LC_CTYPE, G->gDefaultLocale.c_str());
+	if (!saved) return false;
+	for (auto var : dirty_persistent_variables) var->persist_queued = false;
+	dirty_persistent_variables.clear();
+	for (const auto& value : values) value.first->persist_saved_value = value.second;
 	G->user_config_dirty = false;
-
-	fclose(f);
-
-	setlocale(LC_CTYPE, G->gDefaultLocale.c_str());
-
-	return true;
-}
-
-// Append unknown persistent variables to the user config. This is safe because
-// SavePersistentSettings() rewrites the file before every config reload, so
-// anything appended here is temporary: it will disappear on the next reload
-// unless HandleUnknownPersistentSettings() appends it again.
-bool SaveUnknownPersistentSettings()
-{
-	if (unknown_variables.empty())
-		return false;
-
-	setlocale(LC_CTYPE, "en_US.UTF-8");
-
-	FILE* f;
-	wfopen_ensuring_access(&f, G->user_config.c_str(), L"a");
-	if (!f)
-	{
-		LogWarning("Unable to save unknown settings in %S\n", G->user_config.c_str());
-		setlocale(LC_CTYPE, G->gDefaultLocale.c_str());
-		return false;
-	}
-
-	LogInfo("Saving unknown user settings to %S\n", G->user_config.c_str());
-
-	for (auto& entry : unknown_variables)
-		fprintf_s(f, "%ls = %.9g\n", entry.first.c_str(), entry.second);
-
-	fclose(f);
-
-	setlocale(LC_CTYPE, G->gDefaultLocale.c_str());
-
+	persistent_journal_dirty = false;
 	return true;
 }
 
@@ -5107,10 +5074,8 @@ static void HandleUnknownPersistentSettings()
 		// Write d3dx_user.ini only if unknown settings changed since last config reload.
 		if (G->current_unknown_settings_hash != G->last_unknown_settings_hash)
 		{
-			// Write current persistent variables to d3dx_user.ini (purge all unknowns).
+			// Atomically compact known and retained unknown settings together.
 			SavePersistentSettings(true);
-			// Write unknowns to d3dx_user.ini.
-			SaveUnknownPersistentSettings();
 		}
 		ShowUnknownSettingsNotification();
 		return;
@@ -5140,7 +5105,8 @@ static void HandleUnknownPersistentSettings()
 static void WipeUserConfig()
 {
 	G->gWipeUserConfig = false;
-	G->user_config_dirty = false;
+	ResetPersistentTracking();
+	persistent_journal_dirty = false;
 
 	unknown_variables.clear();
 	G->current_unknown_settings_hash = 0;
@@ -5219,8 +5185,7 @@ void ReloadConfig(HackerDevice *device)
 
 		// Save both currently known and unknown persistent variables to d3dx_user.ini.
 		// Result is loaded back by LoadConfigFile() as final step of includes parsing.
-		if (SavePersistentSettings())
-			SaveUnknownPersistentSettings();
+		SavePersistentSettings(persistent_journal_dirty);
 
 		// Reset unknown variables map, so LoadConfigFile() could detect them from scratch.
 		ResetUnknownSettingsCache();

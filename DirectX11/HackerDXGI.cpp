@@ -216,6 +216,7 @@ void HackerSwapChain::RunFrameActions()
 	// list after the present call in case we need to restore state or
 	// affect something at the start of the frame.
 	RunCommandList(mHackerDevice, mHackerContext, &G->present_command_list, NULL, false);
+	PublishActivityChannel();
 
 	if (G->analyse_frame) {
 		// We don't allow hold to be changed mid-frame due to potential
@@ -258,8 +259,7 @@ void HackerSwapChain::RunFrameActions()
 	if (G->gConfigInitialized) {
 		// Autosave persistent variables every gSettingsAutoSaveInterval seconds
 		if (G->gTime - G->gSettingsSaveTime > G->gSettingsAutoSaveInterval) {
-			if (SavePersistentSettings())
-				SaveUnknownPersistentSettings();
+			SavePersistentSettings(false, true);
 			//LogOverlay(LOG_INFO, "Saved Persistent Variables\n");
 		}
 	}
