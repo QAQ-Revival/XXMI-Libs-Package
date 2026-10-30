@@ -5850,7 +5850,7 @@ void VariableAssignment::run(CommandListState *state)
 	COMMAND_LIST_LOG(state, "  = %f\n", var->fval);
 
 	if ((var->flags & VariableFlags::PERSIST) && var->fval != orig)
-		G->user_config_dirty = true;
+		MarkPersistentVariableDirty(var);
 }
 
 bool AssignmentCommand::optimise(HackerDevice *device)
@@ -6205,8 +6205,13 @@ static ResourceType* GetResourceFromPool(
 		ResourceType *dst_resource,
 		ResourcePool *resource_pool,
 		CommandListState *state,
-		DescType *desc)
+		DescType *desc,
+		bool *resource_ready)
 {
+	// NULL can mean either reuse of the current allocation or creation failure.
+	// Report readiness separately so callers retain the cached view on reuse
+	// while still refusing to copy into an incompatible old resource on failure.
+	*resource_ready = false;
 	ResourceType *resource = NULL;
 	DescType old_desc;
 	uint32_t hash;
@@ -6229,6 +6234,7 @@ static ResourceType* GetResourceFromPool(
 			return NULL;
 
 		if (old_device == state->mOrigDevice1) {
+			*resource_ready = true;
 			if (resource == dst_resource)
 				return NULL;
 
@@ -6265,6 +6271,7 @@ static ResourceType* GetResourceFromPool(
 		LogInfo("  NOTICE: cache now contains %Ii resources\n", size);
 
 	LogDebugResourceDesc(desc);
+	*resource_ready = true;
 	return resource;
 }
 
@@ -9051,7 +9058,7 @@ void PoolVariableOperation::SetVariableValue(CommandListState* state, CommandLis
 	COMMAND_LIST_LOG(state, "  = %f\n", dst->fval);
 
 	if ((dst->flags & VariableFlags::PERSIST) && dst->fval != orig)
-		G->user_config_dirty = true;
+		MarkPersistentVariableDirty(dst);
 }
 
 void PoolVariableOperation::SetAllPoolVariables(CommandListState* state, float value)
@@ -11116,7 +11123,8 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		UINT offset,
 		DXGI_FORMAT format,
 		UINT *buf_src_size,
-		UINT *buf_dst_size)
+		UINT *buf_dst_size,
+		bool *resource_ready)
 {
 	D3D11_BUFFER_DESC new_desc;
 	ID3D11Buffer *buffer = NULL;
@@ -11226,13 +11234,29 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		new_desc.ByteWidth = dst_size;
 	}
 
+	// ShapeKey shaders write structured UAVs, but their results are copied
+	// back to ordinary vertex/index buffers for drawing. These bindings (and
+	// stream-output/render-target bindings) cannot inherit a structured flag.
+	// Keep the vertex stride in the copy's out-of-band metadata instead.
+	if (new_desc.BindFlags & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER |
+		D3D11_BIND_STREAM_OUTPUT | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) {
+		new_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		new_desc.StructureByteStride = 0;
+	}
+
 	if (dst && dst->type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
 		CustomResource* dst_custom_resource = dst->GetCustomResource(state, true);
 		dst_custom_resource->OverrideBufferDesc(&new_desc);
 	}
+	// Overrides may use stride to calculate byte_width or array length. That
+	// metadata still reaches SetResource, but only structured allocations have
+	// a D3D11 StructureByteStride. Explicit structured overrides remain checked
+	// by CreateBuffer; a failed allocation must never reuse an incompatible one.
+	if (!(new_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
+		new_desc.StructureByteStride = 0;
 
 	return GetResourceFromPool<ID3D11Buffer, D3D11_BUFFER_DESC, &ID3D11Device::CreateBuffer>
-		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc);
+		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc, resource_ready);
 }
 
 static DXGI_FORMAT MakeTypeless(DXGI_FORMAT fmt)
@@ -11447,7 +11471,8 @@ static ResourceType* RecreateCompatibleTexture(
 		ResourcePool *resource_pool,
 		D3D11_BIND_FLAG bind_flags,
 		CommandListState *state,
-		ResourceCopyOptions options)
+		ResourceCopyOptions options,
+		bool *resource_ready)
 {
 	DescType new_desc;
 
@@ -11488,10 +11513,10 @@ static ResourceType* RecreateCompatibleTexture(
 	}
 
 	return GetResourceFromPool<ResourceType, DescType, CreateTexture>
-		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc);
+		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc, resource_ready);
 }
 
-static void RecreateCompatibleResource(
+static bool RecreateCompatibleResource(
 		wstring *ini_line,
 		ResourceCopyTarget *src, // May be NULL
 		ResourceCopyTarget *dst, // May be NULL
@@ -11512,6 +11537,7 @@ static void RecreateCompatibleResource(
 	D3D11_BIND_FLAG bind_flags = (D3D11_BIND_FLAG)0;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
 	ID3D11Resource *res = NULL;
+	bool resource_ready = false;
 	bool restore_create_mode = false;
 
 	if (dst)
@@ -11523,22 +11549,22 @@ static void RecreateCompatibleResource(
 	switch (src_dimension) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER:
 			res = RecreateCompatibleBuffer(ini_line, src, dst, (ID3D11Buffer*)src_resource, (ID3D11Buffer*)*dst_resource,
-				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format, buf_src_size, buf_dst_size);
+				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format, buf_src_size, buf_dst_size, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 			res = RecreateCompatibleTexture<ID3D11Texture1D, D3D11_TEXTURE1D_DESC, &ID3D11Device::CreateTexture1D>
 				(ini_line, dst, (ID3D11Texture1D*)src_resource, (ID3D11Texture1D*)*dst_resource, resource_pool,
-				 bind_flags, state, options);
+					 bind_flags, state, options, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
 			res = RecreateCompatibleTexture<ID3D11Texture2D, D3D11_TEXTURE2D_DESC, &ID3D11Device::CreateTexture2D>
 				(ini_line, dst, (ID3D11Texture2D*)src_resource, (ID3D11Texture2D*)*dst_resource, resource_pool,
-				 bind_flags, state,options);
+					 bind_flags, state,options, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
 			res = RecreateCompatibleTexture<ID3D11Texture3D, D3D11_TEXTURE3D_DESC, &ID3D11Device::CreateTexture3D>
 				(ini_line, dst, (ID3D11Texture3D*)src_resource, (ID3D11Texture3D*)*dst_resource, resource_pool,
-				 bind_flags, state, options);
+					 bind_flags, state, options, &resource_ready);
 			break;
 	}
 
@@ -11554,6 +11580,7 @@ static void RecreateCompatibleResource(
 		if (dst_view)
 			*dst_view = NULL;
 	}
+	return resource_ready;
 }
 
 template <typename DescType>
@@ -12165,7 +12192,7 @@ static void ResolveMSAA(ID3D11Resource *dst_resource, ID3D11Resource *src_resour
 	}
 }
 
-static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource *src_resource,
+static bool SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource *src_resource,
 		CommandListState *state, UINT src_stride, UINT *src_offset,
 		UINT buf_src_size, UINT buf_dst_size)
 {
@@ -12177,8 +12204,17 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 	// D3D11_BOX::right is an exclusive end offset, whereas buf_dst_size is a
 	// byte count. Calculate the requested end and clamp it to the source buffer's
 	// total size so the copy does not extend beyond the source.
+	D3D11_BUFFER_DESC source_desc, destination_desc;
+	((ID3D11Buffer*)src_resource)->GetDesc(&source_desc);
+	((ID3D11Buffer*)dst_resource)->GetDesc(&destination_desc);
+	buf_src_size = min(buf_src_size, source_desc.ByteWidth);
+	if (*src_offset >= buf_src_size || !buf_dst_size)
+		return false;
 	UINT available_size = buf_src_size - *src_offset;
-	UINT copy_size = min(buf_dst_size, available_size);
+	UINT copy_size = min(min(buf_dst_size, available_size), destination_desc.ByteWidth);
+	UINT alignment = (source_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) ? source_desc.StructureByteStride : 0;
+	if (alignment && (*src_offset % alignment || copy_size % alignment))
+		return false;
 	src_box.left = *src_offset;
 	src_box.right = *src_offset + copy_size;
 
@@ -12193,11 +12229,14 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 	src_box.front = 0;
 	src_box.back = 1;
 
+	if (src_box.right <= src_box.left)
+		return false;
 	state->mOrigContext1->CopySubresourceRegion(dst_resource, 0, 0, 0, 0, src_resource, 0, &src_box);
 
 	// We have effectively removed the offset during the region copy, so
 	// set it to 0 to make sure nothing will try to use it again elsewhere:
 	*src_offset = 0;
+	return true;
 }
 
 static UINT get_resource_bind_flags(ID3D11Resource *resource)
@@ -12578,13 +12617,31 @@ void ResourceCopyOperation::CopyResourceToResource(
 	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION) {
 		offset = (UINT)src.member_args[0].GetValue(state);
 		buf_dst_size = (UINT)src.member_args[1].GetValue(state);
+		if (options & ResourceCopyOptions::COPY_MASK) {
+			D3D11_RESOURCE_DIMENSION dimension;
+			src_resource->GetType(&dimension);
+			if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+				D3D11_BUFFER_DESC desc;
+				((ID3D11Buffer*)src_resource)->GetDesc(&desc);
+				if (!buf_dst_size || offset >= desc.ByteWidth)
+					goto out_release;
+				buf_dst_size = min(buf_dst_size, desc.ByteWidth - offset);
+				if ((desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) && desc.StructureByteStride &&
+					(offset % desc.StructureByteStride || buf_dst_size % desc.StructureByteStride))
+					goto out_release;
+				buf_src_size = desc.ByteWidth;
+			}
+		} else {
+			// QAQR compatibility: legacy REF views use the second argument as an end boundary.
+			buf_src_size = buf_dst_size;
+		}
 	}
 
 	if (options & ResourceCopyOptions::COPY_MASK) {
-		RecreateCompatibleResource(&ini_line, &src, &dst, src_resource, pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
+		const bool resource_ready = RecreateCompatibleResource(&ini_line, &src, &dst, src_resource, pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
 			state, options, stride, offset, format, &buf_src_size, &buf_dst_size);
 
-		if (!*pp_cached_resource) {
+		if (!resource_ready || !*pp_cached_resource) {
 			COMMAND_LIST_LOG(state, "  error creating/updating destination resource\n");
 			goto out_release;
 		}
@@ -12605,7 +12662,11 @@ void ResourceCopyOperation::CopyResourceToResource(
 			Profiling::buffer_region_copies++;
 			if (G->cache_resource_data != DataCacheBindFlags::INVALID && dst_custom_resource)
 				dst_custom_resource->SetHandleInfo(src_resource, offset, buf_dst_size);
-			SpecialCopyBufferRegion(dst_resource, src_resource, state, stride, &offset, buf_src_size, buf_dst_size);
+			if (!SpecialCopyBufferRegion(dst_resource, src_resource, state, stride, &offset, buf_src_size, buf_dst_size))
+				goto out_release;
+			D3D11_BUFFER_DESC copied_desc;
+			((ID3D11Buffer*)dst_resource)->GetDesc(&copied_desc);
+			buf_src_size = copied_desc.ByteWidth;
 		} else {
 			COMMAND_LIST_LOG(state, "  performing full copy (src_stride=%d src_offset=%d src_size=%d)\n", stride, offset, buf_src_size);
 			Profiling::resource_full_copies++;

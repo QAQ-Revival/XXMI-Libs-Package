@@ -135,6 +135,8 @@ public:
 	// TODO: Additional types, such as hash
 	float fval;
 	VariableFlags flags;
+	float persist_saved_value = 0;
+	bool persist_queued = false;
 
 	CommandListVariable(wstring name, float fval, VariableFlags flags) :
 		name(name), fval(fval), flags(flags)
