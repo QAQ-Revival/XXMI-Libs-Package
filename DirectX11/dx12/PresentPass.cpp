@@ -202,6 +202,7 @@ static void run_present_list_for_frame()
 	variable_write_log = &frame_writes;
 	pool_undo_log = &frame_pools;
 	RunCommandList(dx12_shim->hacker_device, dx12_shim->hacker_context, &G->present_command_list, NULL, false);
+	PublishActivityChannel();
 	variable_write_log = NULL;
 	pool_undo_log = NULL;
 	present_seen_valid = true;
@@ -295,7 +296,7 @@ static void frame_actions()
 
 	if (G->gConfigInitialized) {
 		if (G->gTime - G->gSettingsSaveTime > G->gSettingsAutoSaveInterval)
-			SavePersistentSettingsInBackground();
+			SavePersistentSettings(false, true);
 	} else if (G->gTime > G->gConfigInitializationDelay) {
 		G->gConfigInitialized = true;
 		present_seen_valid = false;

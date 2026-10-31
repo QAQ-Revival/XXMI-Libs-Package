@@ -9,9 +9,13 @@ void LoadSkippedIncludes();
 // knowing whether the game is D3D12, and so went by their D3D11 hash
 bool IniDx12HashesProvisional();
 void RegisterUnknownSetting(const wchar_t* name, float value);
-bool SavePersistentSettings(bool force = false);
-bool SaveUnknownPersistentSettings();
-void SavePersistentSettingsInBackground();
+class CommandListVariable;
+void MarkPersistentVariableDirty(CommandListVariable* var);
+void ResetPersistentTracking();
+void ResetActivityChannel();
+void InitializeActivityChannel();
+void PublishActivityChannel();
+bool SavePersistentSettings(bool force = false, bool incremental = false);
 void CleanUpPersistentSettingsSaves();
 
 struct IniLine {

@@ -156,6 +156,8 @@ public:
 	// TODO: Additional types, such as hash
 	float fval;
 	VariableFlags flags;
+	float persist_saved_value = 0;
+	bool persist_queued = false;
 
 	// Alternative d3dx_user.ini key derived from the path of the ini file
 	// that declared the variable. Only set for persistent variables declared

@@ -282,6 +282,7 @@ void HackerSwapChain::RunFrameActions()
 	// list after the present call in case we need to restore state or
 	// affect something at the start of the frame.
 	RunCommandList(mHackerDevice, mHackerContext, &G->present_command_list, NULL, false);
+	PublishActivityChannel();
 
 	if (G->analyse_frame) {
 		// We don't allow hold to be changed mid-frame due to potential
@@ -323,8 +324,10 @@ void HackerSwapChain::RunFrameActions()
 	// This way resources will be loaded properly before modded object appear on screen and cause crash
 	if (G->gConfigInitialized) {
 		// Autosave persistent variables every gSettingsAutoSaveInterval seconds
-		if (G->gTime - G->gSettingsSaveTime > G->gSettingsAutoSaveInterval)
-			SavePersistentSettingsInBackground();
+		if (G->gTime - G->gSettingsSaveTime > G->gSettingsAutoSaveInterval) {
+			SavePersistentSettings(false, true);
+			//LogOverlay(LOG_INFO, "Saved Persistent Variables\n");
+		}
 	}
 	else {
 		if (G->gTime > G->gConfigInitializationDelay) {

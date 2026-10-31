@@ -6726,7 +6726,7 @@ void VariableAssignment::run(CommandListState *state)
 	COMMAND_LIST_LOG(state, "  = %f\n", var->fval);
 
 	if ((var->flags & VariableFlags::PERSIST) && var->fval != orig)
-		G->user_config_dirty = true;
+		MarkPersistentVariableDirty(var);
 }
 
 bool AssignmentCommand::optimise(HackerDevice *device)
@@ -7096,8 +7096,13 @@ static ResourceType* GetResourceFromPool(
 		ResourceType *dst_resource,
 		ResourcePool *resource_pool,
 		CommandListState *state,
-		DescType *desc)
+		DescType *desc,
+		bool *resource_ready)
 {
+	// NULL can mean either reuse of the current allocation or creation failure.
+	// Report readiness separately so callers retain the cached view on reuse
+	// while still refusing to copy into an incompatible old resource on failure.
+	*resource_ready = false;
 	ResourceType *resource = NULL;
 	DescType old_desc;
 	uint32_t hash;
@@ -7120,6 +7125,7 @@ static ResourceType* GetResourceFromPool(
 			return NULL;
 
 		if (old_device == state->mOrigDevice1) {
+			*resource_ready = true;
 			if (resource == dst_resource)
 				return NULL;
 
@@ -7157,6 +7163,7 @@ static ResourceType* GetResourceFromPool(
 		LogInfo("  NOTICE: cache now contains %Ii resources\n", size);
 
 	LogDebugResourceDesc(desc);
+	*resource_ready = true;
 	return resource;
 }
 
@@ -10138,7 +10145,7 @@ void PoolVariableOperation::SetVariableValue(CommandListState* state, CommandLis
 	COMMAND_LIST_LOG(state, "  = %f\n", dst->fval);
 
 	if ((dst->flags & VariableFlags::PERSIST) && dst->fval != orig)
-		G->user_config_dirty = true;
+		MarkPersistentVariableDirty(dst);
 }
 
 void PoolVariableOperation::SetAllPoolVariables(CommandListState* state, float value)
@@ -10829,6 +10836,50 @@ bool ResourceCopyTarget::ResolveRange(CommandListState *state, int *first, unsig
 	return true;
 }
 
+// Stream output and render targets are driven a whole array at a time:
+// D3D11 has no call that reads or writes one slot of either,
+// and nothing in HackerContext shadows their state,
+// so the device is the only place the current bindings can be read back from.
+// SOSetTargets() and OMSetRenderTargets() pass straight through.
+//
+// A command that drives one slot therefore reads the array,
+// swaps its one entry, sets the array again,
+// and drops the references the Get call handed it.
+//
+// The two helpers below hold the reference counting that goes with that,
+// rather than each case repeating it.
+// Repeating it is how a stream output bind came to over-release a buffer.
+
+// The slot wanted out of an array that was read with a count of slot + 1,
+// having dropped the references on the slots below it.
+// The one returned still carries the reference the Get call took,
+// which the caller passes on.
+template <typename T>
+static T* take_slot(T **array, unsigned slot)
+{
+	for (unsigned i = 0; i < slot; i++) {
+		if (array[i]) {
+			array[i]->Release();
+			array[i] = NULL;
+		}
+	}
+	return array[slot];
+}
+
+// Drops the references a Get call took on an array of slots,
+// keeping the one the caller has since overwritten with an object of its own:
+// that slot holds a reference the caller still owns,
+// and the Set call has taken its own.
+// With no slot to keep, every reference is dropped.
+template <typename T>
+static void release_slots(T **array, unsigned count, unsigned keep = UINT_MAX)
+{
+	for (unsigned i = 0; i < count; i++) {
+		if (i != keep && array[i])
+			array[i]->Release();
+	}
+}
+
 ID3D11Resource *ResourceCopyTarget::GetResource(
 		CommandListState *state,
 		ID3D11View **view,   // Used by textures, render targets, depth/stencil buffers & UAVs
@@ -10850,7 +10901,6 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	ID3D11UnorderedAccessView *unordered_view = NULL;
 	D3D11_BIND_FLAG bind_flags = (D3D11_BIND_FLAG)0;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
-	unsigned i;
 
 	// Shadows the member for the dynamic slot case (ps-t[$i]):
 	unsigned slot = ResolveSlot(state);
@@ -10952,31 +11002,16 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		return buf;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		// XXX: Does not give us the offset
+		// D3D11 cannot report the offset a target was bound at.
+		// An `so` source reads as offset 0 whatever the game set,
+		// and `->Region` on one measures from the start of the buffer:
 		mOrigContext1->SOGetTargets(slot + 1, so_bufs);
-
-		// Release any buffers we aren't after:
-		for (i = 0; i < slot; i++) {
-			if (so_bufs[i]) {
-				so_bufs[i]->Release();
-				so_bufs[i] = NULL;
-			}
-		}
-
-		return so_bufs[slot];
+		return take_slot(so_bufs, slot);
 
 	case ResourceCopyTargetType::RENDER_TARGET:
 		mOrigContext1->OMGetRenderTargets(slot + 1, render_view, NULL);
 
-		// Release any views we aren't after:
-		for (i = 0; i < slot; i++) {
-			if (render_view[i]) {
-				render_view[i]->Release();
-				render_view[i] = NULL;
-			}
-		}
-
-		if (!render_view[slot])
+		if (!take_slot(render_view, slot))
 			return NULL;
 
 		render_view[slot]->GetResource(&res);
@@ -11161,12 +11196,12 @@ void ResourceCopyTarget::SetResource(
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
 	ID3D11Buffer *buf = NULL;
 	ID3D11Buffer *so_bufs[D3D11_SO_STREAM_COUNT];
+	UINT so_offsets[D3D11_SO_STREAM_COUNT] = {};
 	ID3D11ShaderResourceView *resource_view = NULL;
 	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
 	ID3D11DepthStencilView *depth_view = NULL;
 	ID3D11UnorderedAccessView *unordered_view = NULL;
 	UINT uav_counter = -1; // TODO: Allow this to be set
-	int i;
 
 	// Shadows the member for the dynamic slot case (ps-t[$i]):
 	unsigned slot = ResolveSlot(state);
@@ -11280,21 +11315,25 @@ void ResourceCopyTarget::SetResource(
 		break;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		// XXX: HERE BE UNTESTED CODE PATHS!
 		buf = (ID3D11Buffer*)res;
 		mOrigContext1->SOGetTargets(D3D11_SO_STREAM_COUNT, so_bufs);
 		if (so_bufs[slot])
 			so_bufs[slot]->Release();
 		so_bufs[slot] = buf;
-		// XXX: We set offsets to NULL here. We should really preserve
-		// them, but I'm not sure how to get their original values,
-		// so... too bad. Probably will never even use this anyway.
-		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, NULL);
 
-		for (i = 0; i < D3D11_SO_STREAM_COUNT; i++) {
-			if (so_bufs[i])
-				so_bufs[i]->Release();
-		}
+		// An offset has the shader write into part of the buffer,
+		// not from the start of it,
+		// so a draw call can re-skin one object out of a shared mesh:
+		//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
+		//
+		// SOGetTargets() does not report where the other slots were bound,
+		// so they are rebound at (UINT)-1, which D3D11 reads as "append":
+		// the stage carries on after whatever it last wrote,
+		// instead of starting over and overwriting what is there.
+		std::fill_n(so_offsets, D3D11_SO_STREAM_COUNT, UINT(-1));
+		so_offsets[slot] = offset;
+		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
+		release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
 
 		break;
 
@@ -11307,10 +11346,7 @@ void ResourceCopyTarget::SetResource(
 
 		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
 
-		for (i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++) {
-			if (i != slot && render_view[i])
-				render_view[i]->Release();
-		}
+		release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, slot);
 		if (depth_view)
 			depth_view->Release();
 
@@ -11325,10 +11361,9 @@ void ResourceCopyTarget::SetResource(
 
 		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
 
-		for (i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++) {
-			if (render_view[i])
-				render_view[i]->Release();
-		}
+		// Only the depth view was replaced, and it is the caller's,
+		// so no slot of this array is kept:
+		release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
 		break;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
@@ -12301,7 +12336,8 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		UINT offset,
 		DXGI_FORMAT format,
 		UINT *buf_src_size,
-		UINT *buf_dst_size)
+		UINT *buf_dst_size,
+		bool *resource_ready)
 {
 	D3D11_BUFFER_DESC new_desc;
 	ID3D11Buffer *buffer = NULL;
@@ -12413,13 +12449,29 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		new_desc.ByteWidth = dst_size;
 	}
 
+	// ShapeKey shaders write structured UAVs, but their results are copied
+	// back to ordinary vertex/index buffers for drawing. These bindings (and
+	// stream-output/render-target bindings) cannot inherit a structured flag.
+	// Keep the vertex stride in the copy's out-of-band metadata instead.
+	if (new_desc.BindFlags & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER |
+		D3D11_BIND_STREAM_OUTPUT | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) {
+		new_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		new_desc.StructureByteStride = 0;
+	}
+
 	if (dst && dst->type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
 		CustomResource* dst_custom_resource = dst->GetCustomResource(state, true);
 		dst_custom_resource->OverrideBufferDesc(&new_desc);
 	}
+	// Overrides may use stride to calculate byte_width or array length. That
+	// metadata still reaches SetResource, but only structured allocations have
+	// a D3D11 StructureByteStride. Explicit structured overrides remain checked
+	// by CreateBuffer; a failed allocation must never reuse an incompatible one.
+	if (!(new_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
+		new_desc.StructureByteStride = 0;
 
 	return GetResourceFromPool<ID3D11Buffer, D3D11_BUFFER_DESC, &ID3D11Device::CreateBuffer>
-		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc);
+		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc, resource_ready);
 }
 
 static DXGI_FORMAT MakeTypeless(DXGI_FORMAT fmt)
@@ -12634,7 +12686,8 @@ static ResourceType* RecreateCompatibleTexture(
 		ResourcePool *resource_pool,
 		D3D11_BIND_FLAG bind_flags,
 		CommandListState *state,
-		ResourceCopyOptions options)
+		ResourceCopyOptions options,
+		bool *resource_ready)
 {
 	DescType new_desc;
 
@@ -12675,10 +12728,10 @@ static ResourceType* RecreateCompatibleTexture(
 	}
 
 	return GetResourceFromPool<ResourceType, DescType, CreateTexture>
-		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc);
+		(ini_line, src_resource, dst_resource, resource_pool, state, &new_desc, resource_ready);
 }
 
-static void RecreateCompatibleResource(
+static bool RecreateCompatibleResource(
 		wstring *ini_line,
 		ResourceCopyTarget *src, // May be NULL
 		ResourceCopyTarget *dst, // May be NULL
@@ -12699,6 +12752,7 @@ static void RecreateCompatibleResource(
 	D3D11_BIND_FLAG bind_flags = (D3D11_BIND_FLAG)0;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
 	ID3D11Resource *res = NULL;
+	bool resource_ready = false;
 	bool restore_create_mode = false;
 
 	if (dst)
@@ -12710,22 +12764,22 @@ static void RecreateCompatibleResource(
 	switch (src_dimension) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER:
 			res = RecreateCompatibleBuffer(ini_line, src, dst, (ID3D11Buffer*)src_resource, (ID3D11Buffer*)*dst_resource,
-				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format, buf_src_size, buf_dst_size);
+				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format, buf_src_size, buf_dst_size, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 			res = RecreateCompatibleTexture<ID3D11Texture1D, D3D11_TEXTURE1D_DESC, &ID3D11Device::CreateTexture1D>
 				(ini_line, dst, (ID3D11Texture1D*)src_resource, (ID3D11Texture1D*)*dst_resource, resource_pool,
-				 bind_flags, state, options);
+					 bind_flags, state, options, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
 			res = RecreateCompatibleTexture<ID3D11Texture2D, D3D11_TEXTURE2D_DESC, &ID3D11Device::CreateTexture2D>
 				(ini_line, dst, (ID3D11Texture2D*)src_resource, (ID3D11Texture2D*)*dst_resource, resource_pool,
-				 bind_flags, state,options);
+					 bind_flags, state,options, &resource_ready);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
 			res = RecreateCompatibleTexture<ID3D11Texture3D, D3D11_TEXTURE3D_DESC, &ID3D11Device::CreateTexture3D>
 				(ini_line, dst, (ID3D11Texture3D*)src_resource, (ID3D11Texture3D*)*dst_resource, resource_pool,
-				 bind_flags, state, options);
+					 bind_flags, state, options, &resource_ready);
 			break;
 	}
 
@@ -12741,6 +12795,7 @@ static void RecreateCompatibleResource(
 		if (dst_view)
 			*dst_view = NULL;
 	}
+	return resource_ready;
 }
 
 template <typename DescType>
@@ -13352,8 +13407,8 @@ static void ResolveMSAA(ID3D11Resource *dst_resource, ID3D11Resource *src_resour
 	}
 }
 
-static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource *src_resource,
-		CommandListState *state, UINT *src_offset,
+static bool SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource *src_resource,
+		CommandListState *state, UINT src_stride, UINT *src_offset,
 		UINT buf_src_size, UINT buf_dst_size)
 {
 	// Copy a byte range from the source buffer into the destination, starting
@@ -13365,8 +13420,17 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 	// D3D11_BOX::right is an exclusive end offset, whereas buf_dst_size is a
 	// byte count. Calculate the requested end and clamp it to the source buffer's
 	// total size so the copy does not extend beyond the source.
-	UINT available_size = *src_offset < buf_src_size ? buf_src_size - *src_offset : 0;
-	UINT copy_size = min(buf_dst_size, available_size);
+	D3D11_BUFFER_DESC source_desc, destination_desc;
+	((ID3D11Buffer*)src_resource)->GetDesc(&source_desc);
+	((ID3D11Buffer*)dst_resource)->GetDesc(&destination_desc);
+	buf_src_size = min(buf_src_size, source_desc.ByteWidth);
+	if (*src_offset >= buf_src_size || !buf_dst_size)
+		return false;
+	UINT available_size = buf_src_size - *src_offset;
+	UINT copy_size = min(min(buf_dst_size, available_size), destination_desc.ByteWidth);
+	UINT alignment = (source_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) ? source_desc.StructureByteStride : 0;
+	if (alignment && (*src_offset % alignment || copy_size % alignment))
+		return false;
 	src_box.left = *src_offset;
 	src_box.right = *src_offset + copy_size;
 
@@ -13389,12 +13453,14 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 	// An offset past the end of the source leaves nothing to copy. The
 	// D3D12 shim takes right - left as the size, so an empty box is not
 	// passed on:
-	if (src_box.right > src_box.left)
-		state->mOrigContext1->CopySubresourceRegion(dst_resource, 0, 0, 0, 0, src_resource, 0, &src_box);
+	if (src_box.right <= src_box.left)
+		return false;
+	state->mOrigContext1->CopySubresourceRegion(dst_resource, 0, 0, 0, 0, src_resource, 0, &src_box);
 
 	// We have effectively removed the offset during the region copy, so
 	// set it to 0 to make sure nothing will try to use it again elsewhere:
 	*src_offset = 0;
+	return true;
 }
 
 static UINT get_resource_bind_flags(ID3D11Resource *resource)
@@ -13780,13 +13846,31 @@ void ResourceCopyOperation::CopyResourceToResource(
 	if (src_region) {
 		offset = (UINT)src.member_args[0].GetValue(state);
 		buf_dst_size = (UINT)src.member_args[1].GetValue(state);
+		if (options & ResourceCopyOptions::COPY_MASK) {
+			D3D11_RESOURCE_DIMENSION dimension;
+			src_resource->GetType(&dimension);
+			if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+				D3D11_BUFFER_DESC desc;
+				((ID3D11Buffer*)src_resource)->GetDesc(&desc);
+				if (!buf_dst_size || offset >= desc.ByteWidth)
+					goto out_release;
+				buf_dst_size = min(buf_dst_size, desc.ByteWidth - offset);
+				if ((desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) && desc.StructureByteStride &&
+					(offset % desc.StructureByteStride || buf_dst_size % desc.StructureByteStride))
+					goto out_release;
+				buf_src_size = desc.ByteWidth;
+			}
+		} else {
+			// QAQR compatibility: legacy REF views use the second argument as an end boundary.
+			buf_src_size = buf_dst_size;
+		}
 	}
 
 	if (options & ResourceCopyOptions::COPY_MASK) {
-		RecreateCompatibleResource(&ini_line, &src, &dst, src_resource, pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
+		const bool resource_ready = RecreateCompatibleResource(&ini_line, &src, &dst, src_resource, pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
 			state, options, stride, offset, format, &buf_src_size, &buf_dst_size);
 
-		if (!*pp_cached_resource) {
+		if (!resource_ready || !*pp_cached_resource) {
 			COMMAND_LIST_LOG(state, "  error creating/updating destination resource\n");
 			goto out_release;
 		}
@@ -13807,10 +13891,13 @@ void ResourceCopyOperation::CopyResourceToResource(
 			Profiling::buffer_region_copies++;
 			if (G->cache_resource_data != DataCacheBindFlags::INVALID && dst_custom_resource)
 				dst_custom_resource->SetHandleInfo(src_resource, offset, buf_dst_size);
-			SpecialCopyBufferRegion(dst_resource, src_resource, state, &offset, buf_src_size, buf_dst_size);
+			if (!SpecialCopyBufferRegion(dst_resource, src_resource, state, stride, &offset, buf_src_size, buf_dst_size))
+				goto out_release;
 			// The destination only holds the copied range, so a view of
 			// it must not be sized by the source:
-			buf_src_size = buf_dst_size;
+			D3D11_BUFFER_DESC copied_desc;
+			((ID3D11Buffer*)dst_resource)->GetDesc(&copied_desc);
+			buf_src_size = copied_desc.ByteWidth;
 		} else {
 			COMMAND_LIST_LOG(state, "  performing full copy (src_stride=%d src_offset=%d src_size=%d)\n", stride, offset, buf_src_size);
 			Profiling::resource_full_copies++;
@@ -13838,7 +13925,9 @@ void ResourceCopyOperation::CopyResourceToResource(
 		if (region_view) {
 			D3D11_BUFFER_DESC src_desc;
 			static_cast<ID3D11Buffer*>(src_resource)->GetDesc(&src_desc);
-			buf_src_size = (UINT)min((UINT64)src_desc.ByteWidth, (UINT64)offset + buf_dst_size);
+			// The second argument stays the end boundary, as on the DX11 build, so
+			// switching backends does not resize a view:
+			buf_src_size = min(src_desc.ByteWidth, buf_src_size);
 			if (*pp_cached_view) {
 				(*pp_cached_view)->Release();
 				*pp_cached_view = NULL;

@@ -1,0 +1,23 @@
+{
+  "upstream": "myparsleycat/XXMI-Libs-Package-Forked",
+  "reviewedUpstream": "38e4be9ca7a253bef4dbd2533c280e281fd0bad1",
+  "activityProtocol": 1,
+  "changes": [
+    "Net-change persistence journal and atomic compaction on reload",
+    "CPU shared-memory activity channel without persistent heartbeat writes",
+    "Keep upstream COPY length handling with empty, range, alignment and cached-resource guards",
+    "Preserve legacy REF view end-boundary behavior for QAQR compatibility",
+    "Distinguish compatible resource reuse from creation failure so repeated buffer and texture copies keep executing",
+    "Convert structured compute output to valid plain vertex/index buffers for ShapeKey menus, preserving out-of-band stride and failure guards",
+    "The Vulkan and D3D12 present path publishes the activity channel and saves through the persistence journal",
+    "The journal writes the keys persistent_variable_key selects",
+    "REF views keep the end boundary of the DX11 build, so switching backends does not resize a view"
+  ],
+  "validation": "Isolated D3D11 WARP processes; the Vulkan path has no check without a game",
+  "compatibleRuntimeHashes": [
+    "ea97846af4610b9af42beddccd7f22a5e73e85b25669cd4391ea8000962fdd7d",
+    "a540f5d5ec838f3f1777b0f93a0207eb4783e42738ad703d8b7d64e04fa241c4",
+    "9db712c53a1b34690dbd31c79ef097977eeeca6bdab2dd5bfea85877eb4bac2e"
+  ],
+  "mergedFrom": "origin/master"
+}
