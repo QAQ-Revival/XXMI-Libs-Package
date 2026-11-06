@@ -8,7 +8,8 @@
     "Keep upstream COPY length handling with empty, range, alignment and cached-resource guards",
     "Preserve legacy REF view end-boundary behavior for QAQR compatibility",
     "Distinguish compatible resource reuse from creation failure so repeated buffer and texture copies keep executing",
-    "Convert structured compute output to valid plain vertex/index buffers for ShapeKey menus, preserving out-of-band stride and failure guards"
+    "Convert structured compute output to valid plain vertex/index buffers for ShapeKey menus, preserving out-of-band stride and failure guards",
+    "Share one GPU resource between [Resource] sections whose files are identical (share_duplicate_resources, default on; written, render target, UAV and pool resources keep their own copy), ported from the Vulkan branch"
   ],
   "validation": "Isolated D3D11 WARP processes; no game is launched or injected",
   "compatibleRuntimeHashes": [
