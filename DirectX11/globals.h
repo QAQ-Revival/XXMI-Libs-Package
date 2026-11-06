@@ -15,6 +15,7 @@
 #include "DecompileHLSL.h"
 
 #include "ResourceHash.h"
+#include "ResourceLoading.h"
 #include "ShaderRegex.h"
 #include "CommandList.h"
 #include "profiling.h"
@@ -546,6 +547,7 @@ struct Globals
 	int gFallbackScreenWidth;
 	int gFallbackScreenHeight;
 	bool gForceDetectColorSpace;
+	bool share_duplicate_resources;
 
 	CRITICAL_SECTION mCriticalSection;
 
@@ -771,6 +773,7 @@ struct Globals
 		gFallbackScreenWidth(0),
 		gFallbackScreenHeight(0),
 		gForceDetectColorSpace(false),
+		share_duplicate_resources(true),
 		dump_all_profiles(false),
 		gSystemTickCount(0),
 		gTime(0),

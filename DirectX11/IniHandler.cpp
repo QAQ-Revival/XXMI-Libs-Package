@@ -2198,6 +2198,7 @@ static void ParseResourceSections()
 	ClearDeferredBindFlags();
 	customResourcePools.clear();
 	customResources.clear();
+	ReleaseSharedFileResources();
 
 	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Pool"));
 	IniSections::iterator upper = prefix_upper_bound(ini_sections, wstring(L"Pool"));
@@ -4729,6 +4730,7 @@ void LoadConfigFile()
 	}
 
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
+	G->share_duplicate_resources = GetIniBool(L"Rendering", L"share_duplicate_resources", true, NULL);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 
