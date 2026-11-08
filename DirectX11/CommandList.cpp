@@ -544,19 +544,36 @@ void optimise_command_lists(HackerDevice *device)
 
 		// Go through each registered command list and remove any
 		// commands that are noops to eliminate the runtime overhead of
-		// processing these
-		for (CommandList *command_list : registered_command_lists) {
-			for (i = 0; i < command_list->commands.size(); ) {
-				if (command_list->commands[i]->noop(command_list->post, ignore_cto_pre, ignore_cto_post)) {
+		// processing these.
+		//
+		// The lists of an if block are registered after the list that
+		// holds it, so going backwards empties the innermost blocks
+		// first and a long "else if" chain, which nests one level per
+		// branch, collapses in one pass instead of one level per pass.
+		// noop() only ever turns from false to true as commands are
+		// removed, so the order changes how many passes it takes but
+		// not which commands are removed in the end.
+		for (auto it = registered_command_lists.rbegin(); it != registered_command_lists.rend(); ++it) {
+			CommandList *command_list = *it;
+			CommandList::Commands &commands = command_list->commands;
+			size_t kept = 0;
+
+			// Compacted in place rather than erased one at a time,
+			// which was quadratic in the longest lists ([Constants]
+			// gathers every mod's lines into one):
+			for (i = 0; i < commands.size(); i++) {
+				if (commands[i]->noop(command_list->post, ignore_cto_pre, ignore_cto_post)) {
 					LogInfo("Optimised out %s %S\n",
 							command_list->post ? "post" : "pre",
-							command_list->commands[i]->ini_line.c_str());
-					command_list->commands.erase(command_list->commands.begin() + i);
+							commands[i]->ini_line.c_str());
 					making_progress = true;
 					continue;
 				}
-				i++;
+				if (kept != i)
+					commands[kept] = std::move(commands[i]);
+				kept++;
 			}
+			commands.resize(kept);
 		}
 
 		// TODO: Merge adjacent commands if possible, e.g. all the
@@ -918,7 +935,7 @@ static ExplicitCommandListSection* FindExplicitCommandListSection(const wchar_t*
 	// Key/Preset parsing code will not have, and rather than require it to
 	// we do it here:
 	wstring section_id(val);
-	std::transform(section_id.begin(), section_id.end(), section_id.begin(), ::towlower);
+	std::transform(section_id.begin(), section_id.end(), section_id.begin(), fast_towlower);
 
 	it = explicitCommandListSections.end();
 	if (get_namespaced_section_name_lower(&section_id, ini_namespace, &namespaced_section))
@@ -6501,8 +6518,74 @@ bool CustomResource::ShareableFromFile(D3D11_BIND_FLAG effective_bind_flags)
 				| D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_STREAM_OUTPUT));
 }
 
+void CustomResource::BufferDescForData(D3D11_BUFFER_DESC *desc, DWORD size)
+{
+	memset(desc, 0, sizeof(*desc));
+	desc->Usage = D3D11_USAGE_DEFAULT;
+	desc->BindFlags = bind_flags;
+	desc->MiscFlags = misc_flags;
+
+	// Allow the buffer size to be set from the file / initial data size,
+	// but it can be overridden if specified explicitly. If it's a
+	// structured buffer, we assume just a single structure by default, but
+	// again this can be overridden. The reason for doing this here, and
+	// not in OverrideBufferDesc, is that this only applies if we are
+	// substantiating the resource from scratch, not when copying a resource.
+	if (size) {
+		desc->ByteWidth = size;
+		if (override_type == CustomResourceType::STRUCTURED_BUFFER)
+			desc->StructureByteStride = size;
+	}
+
+	OverrideBufferDesc(desc);
+}
+
+static void BufferShareKey(SharedResourceKey *key, ID3D11Device *device, const D3D11_BUFFER_DESC &desc)
+{
+	key->device = device;
+	key->loader = SharedResourceLoader::BUFFER;
+	key->bind_flags = desc.BindFlags;
+	key->misc_flags = desc.MiscFlags;
+	key->byte_width = desc.ByteWidth;
+	key->structure_stride = desc.StructureByteStride;
+}
+
+// The buffer kept from before the config was reloaded, if this file has not
+// changed since and the section creates it the same way:
+bool CustomResource::RetainedBufferFromFile(ID3D11Device *mOrigDevice1, const FileIdentity &identity)
+{
+	SharedResourceKey share_key;
+	D3D11_BUFFER_DESC desc;
+
+	if (identity.size > UINT_MAX)
+		return false;
+
+	BufferDescForData(&desc, (DWORD)identity.size);
+	if (!ShareableFromFile((D3D11_BIND_FLAG)desc.BindFlags))
+		return false;
+
+	BufferShareKey(&share_key, mOrigDevice1, desc);
+	resource = FindRetainedFileResource(share_key, filename, identity);
+	if (!resource)
+		return false;
+
+	LogInfo("Kept the buffer loaded from unchanged %S [%S] before the reload\n", filename.c_str(), name.c_str());
+	Profiling::resources_retained++;
+	device = mOrigDevice1;
+	is_null = false;
+	OverrideOutOfBandInfo(&format, &stride);
+	buf_size = (UINT)identity.size;
+	return true;
+}
+
 void CustomResource::LoadBufferFromFile(ID3D11Device *mOrigDevice1)
 {
+	FileIdentity identity;
+
+	if (G->share_duplicate_resources && GetFileIdentity(filename.c_str(), &identity)
+			&& RetainedBufferFromFile(mOrigDevice1, identity))
+		return;
+
 	MappedFile file(filename.c_str());
 
 	if (!file.valid()) {
@@ -6557,11 +6640,36 @@ DirectX::WIC_LOADER_FLAGS CustomResource::GetWICFlags(const uint8_t *data, size_
 	return DirectX::WIC_LOADER_FLAGS::WIC_LOADER_DEFAULT;
 }
 
+// GetWICFlags() when the result does not depend on the image:
+bool CustomResource::WICFlagsWithoutData(DirectX::WIC_LOADER_FLAGS *flags)
+{
+	switch (override_color_space) {
+		case CustomColorSpace::LINEAR:
+		case CustomColorSpace::SRGB:
+			*flags = (DirectX::WIC_LOADER_FLAGS) override_color_space;
+			return true;
+		default:
+			*flags = DirectX::WIC_LOADER_DEFAULT;
+			return !G->gForceDetectColorSpace;
+	}
+}
+
+static void TextureShareKey(SharedResourceKey *key, ID3D11Device *device, D3D11_BIND_FLAG bind_flags,
+		D3D11_RESOURCE_MISC_FLAG misc_flags, bool dds, bool force_srgb, DirectX::WIC_LOADER_FLAGS wic_flags)
+{
+	key->device = device;
+	key->loader = dds ? SharedResourceLoader::DDS : SharedResourceLoader::WIC;
+	key->bind_flags = bind_flags;
+	key->misc_flags = misc_flags;
+	key->load_flags = dds ? force_srgb : wic_flags;
+}
+
 void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 {
 	SharedResourceKey share_key;
 	DirectX::WIC_LOADER_FLAGS wic_flags = DirectX::WIC_LOADER_DEFAULT;
-	bool dds, share, force_srgb;
+	FileIdentity identity;
+	bool dds, share, force_srgb, has_identity = false;
 	size_t dot;
 	HRESULT hr;
 
@@ -6598,6 +6706,27 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 	// Needs to be called at some point before CreateXXXTextureFromMemory:
 	EnsureCOM();
 
+	dot = filename.rfind(L'.');
+	dds = dot != wstring::npos && !_wcsicmp(filename.c_str() + dot, L".dds");
+	force_srgb = override_color_space == CustomColorSpace::SRGB;
+	share = ShareableFromFile(bind_flags);
+
+	// The texture kept from before the config was reloaded, if this file
+	// has not changed since and the section loads it the same way. A PNG
+	// whose color space is detected from its contents is not known to load
+	// the same way until it has been read, so that one is read first:
+	if (share && (dds || WICFlagsWithoutData(&wic_flags)) && GetFileIdentity(filename.c_str(), &identity)) {
+		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, force_srgb, wic_flags);
+		resource = FindRetainedFileResource(share_key, filename, identity);
+		if (resource) {
+			LogInfoW(L"Kept the texture loaded from unchanged %s before the reload\n", filename.c_str());
+			Profiling::resources_retained++;
+			device = mOrigDevice1;
+			is_null = false;
+			return;
+		}
+	}
+
 	MappedFile file(filename.c_str());
 	if (!file.valid()) {
 		LogOverlayW(LOG_WARNING, L"Failed to load custom texture resource %ls: %d\n", filename.c_str(), file.error);
@@ -6607,20 +6736,14 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 	// while the runtime copies the initial data out of the mapping:
 	file.prefetch();
 
-	dot = filename.rfind(L'.');
-	dds = dot != wstring::npos && !_wcsicmp(filename.c_str() + dot, L".dds");
-	force_srgb = override_color_space == CustomColorSpace::SRGB;
 	if (!dds)
 		wic_flags = GetWICFlags(file.data, file.size);
 
-	share = ShareableFromFile(bind_flags);
 	if (share) {
-		share_key.device = mOrigDevice1;
-		share_key.loader = dds ? SharedResourceLoader::DDS : SharedResourceLoader::WIC;
-		share_key.bind_flags = bind_flags;
-		share_key.misc_flags = misc_flags;
-		share_key.load_flags = dds ? force_srgb : wic_flags;
-		resource = FindSharedFileResource(share_key, file.data, file.size);
+		has_identity = file.identity(&identity);
+		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, force_srgb, wic_flags);
+		resource = FindSharedFileResource(share_key, file.data, file.size,
+				&filename, has_identity ? &identity : nullptr);
 		if (resource) {
 			LogInfoW(L"Sharing the texture already loaded from identical %s\n", filename.c_str());
 			Profiling::resources_shared++;
@@ -6647,7 +6770,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 		device = mOrigDevice1;
 		is_null = false;
 		if (share)
-			ShareFileResource(share_key, filename, resource);
+			ShareFileResource(share_key, filename, resource, has_identity ? &identity : nullptr);
 		// TODO:
 		// format = ...
 	} else
@@ -6658,6 +6781,8 @@ void CustomResource::SubstantiateBuffer(ID3D11Device *mOrigDevice1, const void *
 {
 	D3D11_SUBRESOURCE_DATA init_data = {0}, *pInitialData = NULL;
 	SharedResourceKey share_key;
+	FileIdentity identity;
+	bool has_identity = false;
 	void *enlarged = NULL;
 	ID3D11Buffer *buffer;
 	D3D11_BUFFER_DESC desc;
@@ -6672,24 +6797,7 @@ void CustomResource::SubstantiateBuffer(ID3D11Device *mOrigDevice1, const void *
 		size = (DWORD)initial_data_size;
 	}
 
-	memset(&desc, 0, sizeof(desc));
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.BindFlags = bind_flags;
-	desc.MiscFlags = misc_flags;
-
-	// Allow the buffer size to be set from the file / initial data size,
-	// but it can be overridden if specified explicitly. If it's a
-	// structured buffer, we assume just a single structure by default, but
-	// again this can be overridden. The reason for doing this here, and
-	// not in OverrideBufferDesc, is that this only applies if we are
-	// substantiating the resource from scratch, not when copying a resource.
-	if (size) {
-		desc.ByteWidth = size;
-		if (override_type == CustomResourceType::STRUCTURED_BUFFER)
-			desc.StructureByteStride = size;
-	}
-
-	OverrideBufferDesc(&desc);
+	BufferDescForData(&desc, size);
 
 	// Sharing is decided on the flags the buffer is created with, since an
 	// ini bind_flags override can make it writable through a UAV even
@@ -6698,13 +6806,10 @@ void CustomResource::SubstantiateBuffer(ID3D11Device *mOrigDevice1, const void *
 		share_file = nullptr;
 
 	if (share_file) {
-		share_key.device = mOrigDevice1;
-		share_key.loader = SharedResourceLoader::BUFFER;
-		share_key.bind_flags = desc.BindFlags;
-		share_key.misc_flags = desc.MiscFlags;
-		share_key.byte_width = desc.ByteWidth;
-		share_key.structure_stride = desc.StructureByteStride;
-		resource = FindSharedFileResource(share_key, share_file->data, share_file->size);
+		has_identity = share_file->identity(&identity);
+		BufferShareKey(&share_key, mOrigDevice1, desc);
+		resource = FindSharedFileResource(share_key, share_file->data, share_file->size,
+				&filename, has_identity ? &identity : nullptr);
 		if (resource) {
 			LogInfo("Sharing the buffer already loaded from identical %S [%S]\n", filename.c_str(), name.c_str());
 			Profiling::resources_shared++;
@@ -6743,7 +6848,7 @@ void CustomResource::SubstantiateBuffer(ID3D11Device *mOrigDevice1, const void *
 		is_null = false;
 		OverrideOutOfBandInfo(&format, &stride);
 		if (share_file)
-			ShareFileResource(share_key, filename, resource);
+			ShareFileResource(share_key, filename, resource, has_identity ? &identity : nullptr);
 	} else {
 		LogOverlayW(LOG_NOTICE, L"Failed to substantiate custom %ls [%ls]: 0x%x\n",
 				lookup_enum_name(CustomResourceTypeNames, override_type), name.c_str(), hr);

@@ -98,6 +98,7 @@ namespace Profiling {
 	extern unsigned views_cleared;
 	extern unsigned resources_created;
 	extern unsigned resources_shared;
+	extern unsigned resources_retained;
 	extern unsigned resource_pool_swaps;
 	extern unsigned max_copies_per_frame_exceeded;
 	extern unsigned injected_draw_calls;

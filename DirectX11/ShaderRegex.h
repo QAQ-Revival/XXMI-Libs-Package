@@ -57,9 +57,14 @@ struct ShaderBindings
 	std::array<ShaderResource, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> resources{};
 };
 
-void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required);
-bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline);
-ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline);
+// Each of these can return the indices of the groups that matched and were
+// linked, in shader_regex_group_index, which link_shader_regex_group_ids()
+// links again for the same shader after a reload while shader_regex_hash is
+// unchanged:
+void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required, vector<uint32_t> *linked_ids = nullptr);
+bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline, vector<uint32_t> *linked_ids = nullptr);
+ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline, vector<uint32_t> *linked_ids = nullptr);
+bool link_shader_regex_group_ids(UINT64 hash, const vector<uint32_t> &ids);
 void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode);
 bool unlink_shader_regex_command_lists_and_filter_index(UINT64 shader_hash);
 

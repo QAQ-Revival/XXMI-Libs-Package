@@ -474,7 +474,7 @@ struct ShaderRegexCacheHeader {
 	uint32_t num_matches;
 };
 
-ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline)
+ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline, vector<uint32_t> *linked_ids)
 {
 	ShaderRegexCache ret = ShaderRegexCache::NO_CACHE;
 	HANDLE meta_f = INVALID_HANDLE_VALUE;
@@ -538,6 +538,8 @@ ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type
 			tagline->append(std::wstring(L"[") + group->ini_section + std::wstring(L"]"));
 
 		group->link_command_lists_and_filter_index(hash);
+		if (linked_ids)
+			linked_ids->push_back(match_ids[i]);
 	}
 
 	if (header->patched) {
@@ -718,7 +720,7 @@ bool get_shader_model_from_bytecode(const void* data, size_t size, std::string* 
 }
 
 // Process groups that do not have patches to apply. Those can be handled without disassembly.
-void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required)
+void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required, vector<uint32_t> *linked_ids)
 {
 	ShaderRegexGroups::iterator i;
 	vector<uint32_t> match_ids;
@@ -752,6 +754,8 @@ void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::
 		for (ShaderRegexGroup* group : match_groups) {
 			group->link_command_lists_and_filter_index(hash);
 		}
+		if (linked_ids)
+			*linked_ids = match_ids;
 		// We save the cache metadata even if we didn't match anything. That
 		// way we can skip checking for a match next time when we know there
 		// won't be any. This only saves the metadata - the caller will use
@@ -760,7 +764,7 @@ void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::
 	}
 }
 
-bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline)
+bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline, vector<uint32_t> *linked_ids)
 {
 	ShaderRegexGroups::iterator i;
 	ShaderRegexGroup *group;
@@ -803,6 +807,24 @@ bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type
 	// won't be any. This only saves the metadata - the caller will use
 	// save_shader_regex_cache_bin to save the assembled binary.
 	save_shader_regex_cache_meta(hash, shader_type, &match_ids, patched, asm_text, tagline);
+	if (linked_ids)
+		*linked_ids = match_ids;
 
 	return patched;
+}
+
+// Links the groups a shader matched before the config was reloaded, which
+// the caller has checked was under the same shader_regex_hash, so the same
+// groups are at the same indices:
+bool link_shader_regex_group_ids(UINT64 hash, const vector<uint32_t> &ids)
+{
+	for (uint32_t id : ids) {
+		if (id >= shader_regex_group_index.size())
+			return false;
+	}
+	for (uint32_t id : ids) {
+		LogInfo("ShaderRegex kept from before the reload: %016I64x matches [%S]\n", hash, shader_regex_group_index[id]->ini_section.c_str());
+		shader_regex_group_index[id]->link_command_lists_and_filter_index(hash);
+	}
+	return true;
 }

@@ -51,6 +51,12 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Region probe build failed' }
             & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/share.cpp') /Fe:share.exe /link d3dcompiler.lib
             if ($LASTEXITCODE -ne 0) { throw 'Share probe build failed' }
+            & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/initext.cpp') /Fe:initext.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Ini text probe build failed' }
+            & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/reload.cpp') /Fe:reload.exe /link d3dcompiler.lib user32.lib
+            if ($LASTEXITCODE -ne 0) { throw 'Reload probe build failed' }
+            & ./initext.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Ini text decoding differs from the stream it replaced' }
             $taskDll = Join-Path $taskWork 'd3d11.dll'
             $taskFixture = Join-Path $taskWork ('autosave-' + [guid]::NewGuid().ToString('N'))
             & ./autosave.exe $taskDll $taskFixture initial
@@ -64,6 +70,8 @@ try {
             foreach ($mode in @('on','off')) {
                 & ./share.exe $taskDll $mode
                 if ($LASTEXITCODE -ne 0) { throw "Duplicate resource sharing failed: $mode" }
+                & ./reload.exe $taskDll $mode
+                if ($LASTEXITCODE -ne 0) { throw "Config reload reuse failed: $mode" }
             }
         } finally { Pop-Location }
     }

@@ -1,4 +1,5 @@
 #include "IniHandler.h"
+#include "IniText.h"
 
 #include <algorithm>
 #include <iterator>
@@ -92,12 +93,12 @@ static Section AllowLinesWithoutEquals[] = {
 static bool whitelisted_duplicate_key(const wchar_t *section, const wchar_t *key)
 {
 	// FIXME: Make this declarative
-	if (!_wcsnicmp(section, L"key", 3)) {
-		if (!_wcsicmp(key, L"key") || !_wcsicmp(key, L"back"))
+	if (!fast_wcsnicmp(section, L"key", 3)) {
+		if (!fast_wcsicmp(key, L"key") || !fast_wcsicmp(key, L"back"))
 			return true;
 	}
 
-	if (!_wcsicmp(section, L"include"))
+	if (!fast_wcsicmp(section, L"include"))
 		return true;
 
 	return false;
@@ -111,10 +112,10 @@ static bool SectionInList(const wchar_t *section, Section section_list[], int li
 	for (i = 0; i < list_size; i++) {
 		if (section_list[i].prefix) {
 			len = wcslen(section_list[i].section);
-			if (!_wcsnicmp(section, section_list[i].section, len))
+			if (!fast_wcsnicmp(section, section_list[i].section, len))
 				return true;
 		} else {
-			if (!_wcsicmp(section, section_list[i].section))
+			if (!fast_wcsicmp(section, section_list[i].section))
 				return true;
 		}
 	}
@@ -146,7 +147,7 @@ static const wchar_t* SectionPrefixFromList(const wchar_t *section, Section sect
 	for (i = 0; i < list_size; i++) {
 		if (section_list[i].prefix) {
 			len = wcslen(section_list[i].section);
-			if (!_wcsnicmp(section, section_list[i].section, len))
+			if (!fast_wcsnicmp(section, section_list[i].section, len))
 				return section_list[i].section;
 		}
 	}
@@ -173,7 +174,7 @@ static const wchar_t* SectionPrefix(const wchar_t *section)
 struct WStringInsensitiveLess {
 	bool operator() (const wstring &x, const wstring &y) const
 	{
-		return _wcsicmp(x.c_str(), y.c_str()) < 0;
+		return fast_wcsicmp(x.c_str(), y.c_str()) < 0;
 	}
 };
 
@@ -183,18 +184,22 @@ struct WStringInsensitiveLess {
 struct WStringInsensitiveHash {
 	size_t operator()(const wstring &s) const
 	{
-		std::wstring l;
-		std::hash<std::wstring> whash;
+		// The value std::hash gives the lower case copy of the string
+		// (FNV-1a over its bytes), without making that copy:
+		size_t hash = std::_FNV_offset_basis;
 
-		l.resize(s.size());
-		std::transform(s.begin(), s.end(), l.begin(), ::towlower);
-		return whash(l);
+		for (wchar_t c : s) {
+			wchar_t l = fast_towlower(c);
+			hash = (hash ^ (unsigned char)(l & 0xff)) * std::_FNV_prime;
+			hash = (hash ^ (unsigned char)(l >> 8)) * std::_FNV_prime;
+		}
+		return hash;
 	}
 };
 struct WStringInsensitiveEquality {
 	size_t operator()(const wstring &x, const wstring &y) const
 	{
-		return _wcsicmp(x.c_str(), y.c_str()) == 0;
+		return fast_wcsicmp(x.c_str(), y.c_str()) == 0;
 	}
 };
 
@@ -230,7 +235,7 @@ static IniSections::iterator prefix_upper_bound(IniSections &sections, wstring &
 	IniSections::iterator i;
 
 	for (i = sections.lower_bound(prefix); i != sections.end(); i++) {
-		if (_wcsnicmp(i->first.c_str(), prefix.c_str(), prefix.length()) > 0)
+		if (fast_wcsnicmp(i->first.c_str(), prefix.c_str(), prefix.length()) > 0)
 			return i;
 	}
 
@@ -284,7 +289,7 @@ bool get_namespaced_section_name_lower(const wstring *section, const wstring *in
 
 	rc = get_namespaced_section_name(section, ini_namespace, ret);
 	if (rc)
-		std::transform(ret->begin(), ret->end(), ret->begin(), ::towlower);
+		std::transform(ret->begin(), ret->end(), ret->begin(), fast_towlower);
 	return rc;
 }
 
@@ -292,7 +297,7 @@ wstring get_namespaced_var_name_lower(const wstring& low_name, const wstring* in
 {
 	wstring ret = L"$\\" + *ini_namespace + L'\\';
 	auto namespace_begin = ret.begin() + 2;  // Skip "$\\"
-	std::transform(namespace_begin, namespace_begin + ini_namespace->size(), namespace_begin, ::towlower);
+	std::transform(namespace_begin, namespace_begin + ini_namespace->size(), namespace_begin, fast_towlower);
 	ret.append(low_name, 1, wstring::npos);
 	return ret;
 }
@@ -460,7 +465,7 @@ bool check_include_condition(wstring *val, const wstring *ini_namespace)
 	float ret;
 
 	// Expressions are case insensitive:
-	std::transform(sbuf.begin(), sbuf.end(), sbuf.begin(), ::towlower);
+	std::transform(sbuf.begin(), sbuf.end(), sbuf.begin(), fast_towlower);
 
 	if (!condition.parse(&sbuf, ini_namespace, NULL)) {
 		IniWarningW(L"Unable to parse include condition: %ls\n - [%ls]\n", val->c_str(), ini_namespace->c_str());
@@ -495,11 +500,11 @@ static bool ParseIniPreamble(wstring *wline, wstring *ini_namespace)
 		if (first != wline->npos)
 			val = wline->substr(first);
 
-		if (!_wcsicmp(key.c_str(), L"condition")) {
+		if (!fast_wcsicmp(key.c_str(), L"condition")) {
 			return check_include_condition(&val, ini_namespace);
 		}
 
-		if (!_wcsicmp(key.c_str(), L"namespace")) {
+		if (!fast_wcsicmp(key.c_str(), L"namespace")) {
 			LogInfo("        Renaming namespace \"%S\" -> \"%S\"\n", ini_namespace->c_str(), val.c_str());
 			*ini_namespace = val;
 			return true;
@@ -563,17 +568,14 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		}
 	}
 
-	section_entry->kv_vec.emplace_back(key, val, *wline, *ini_namespace);
+	// The map has its own copies by now:
+	section_entry->kv_vec.emplace_back(std::move(key), std::move(val), *wline, *ini_namespace);
 }
 
-static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
+// Parses one ini file or excerpt, fed to it a line at a time:
+class IniTextParser
 {
-	string aline;
 	wstring wline, section, ini_path;
-
-	size_t first, last;
-	size_t line_start = 0;
-	IniSectionVector *section_vector = NULL;
 	IniSection* section_entry = NULL;
 
 	int warn_duplicates = 1;
@@ -581,66 +583,108 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 	wstring ini_namespace;
 	bool preamble = true;
 
-	// Simplify code further on by translating NULL to "" here:
-	if (_ini_namespace)
-		ini_namespace = *_ini_namespace;
-	else
-		ini_namespace = L"";
-	ini_path = ini_namespace;
-
-	while (std::getline(*stream, wline)) {
-		// Strip preceding and trailing whitespace:
-		first = wline.find_first_not_of(L" \t");
-		last = wline.find_last_not_of(L" \t");
-
-		if (first == wline.npos)
-			continue;
-
-		wline = wline.substr(first, last - first + 1);
-
-		// Comments are lines that start with a semicolon as the first
-		// non-whitespace character that we want to skip over (note
-		// that a semicolon appearing in the middle of a line is *NOT*
-		// a comment in an ini file. It might be tempting to treat them
-		// as comments since a lot of people do seem to try to do that,
-		// but there may be cases where a semicolon is part of valid
-		// syntax and I am hesitant to change that underlying handling
-		// here, at least not without auditing most of the d3dx.ini
-		// files already in the wild. Let's at least try not to add any
-		// new syntax that includes semicolons anyway!)
-		if (wline[0] == L';') {
-			if (ini_path == G->user_config && wline == L"; QAQR incremental update")
-				persistent_journal_dirty = true;
-			continue;
-		}
-
-		// Section?
-		if (wline[0] == L'[') {
-			preamble = false;
-			ParseIniSectionLine(&wline, &section, &warn_duplicates,
-					    &warn_lines_without_equals,
-					    &section_entry, &ini_namespace,
-					    &ini_path);
-			continue;
-		}
-
-		if (preamble) {
-			if (!ParseIniPreamble(&wline, &ini_namespace))
-				return;
-			continue;
-		}
-
-		ParseIniKeyValLine(&wline, &section, warn_duplicates,
-				   warn_lines_without_equals, section_entry,
-				   &ini_namespace);
+public:
+	IniTextParser(const wstring *_ini_namespace)
+	{
+		// Simplify code further on by translating NULL to "" here:
+		if (_ini_namespace)
+			ini_namespace = *_ini_namespace;
+		else
+			ini_namespace = L"";
+		ini_path = ini_namespace;
 	}
+
+	// Returns false when the rest of the input must be ignored:
+	bool ParseLine(const wchar_t *line, size_t len);
+};
+
+bool IniTextParser::ParseLine(const wchar_t *line, size_t len)
+{
+	size_t first = 0, last = len;
+
+	// Strip preceding and trailing whitespace:
+	while (first < len && (line[first] == L' ' || line[first] == L'\t'))
+		first++;
+
+	if (first == len)
+		return true;
+
+	while (line[last - 1] == L' ' || line[last - 1] == L'\t')
+		last--;
+
+	wline.assign(line + first, last - first);
+
+	// Comments are lines that start with a semicolon as the first
+	// non-whitespace character that we want to skip over (note
+	// that a semicolon appearing in the middle of a line is *NOT*
+	// a comment in an ini file. It might be tempting to treat them
+	// as comments since a lot of people do seem to try to do that,
+	// but there may be cases where a semicolon is part of valid
+	// syntax and I am hesitant to change that underlying handling
+	// here, at least not without auditing most of the d3dx.ini
+	// files already in the wild. Let's at least try not to add any
+	// new syntax that includes semicolons anyway!)
+	if (wline[0] == L';') {
+		if (ini_path == G->user_config && wline == L"; QAQR incremental update")
+			persistent_journal_dirty = true;
+		return true;
+	}
+
+	// Section?
+	if (wline[0] == L'[') {
+		preamble = false;
+		ParseIniSectionLine(&wline, &section, &warn_duplicates,
+				    &warn_lines_without_equals,
+				    &section_entry, &ini_namespace,
+				    &ini_path);
+		return true;
+	}
+
+	if (preamble)
+		return ParseIniPreamble(&wline, &ini_namespace);
+
+	ParseIniKeyValLine(&wline, &section, warn_duplicates,
+			   warn_lines_without_equals, section_entry,
+			   &ini_namespace);
+	return true;
+}
+
+static void ParseIniText(const wstring &text, const wstring *ini_namespace)
+{
+	IniTextParser parser(ini_namespace);
+
+	ForEachIniLine(text, [&](const wchar_t *line, size_t len) {
+		return parser.ParseLine(line, len);
+	});
 }
 
 static void ParseIniExcerpt(const wchar_t *excerpt)
 {
-	std::wistringstream stream(excerpt);
+	ParseIniText(excerpt, NULL);
+}
 
-	ParseIniStream(&stream, NULL);
+static bool ReadIniText(const wchar_t *path, wstring *text)
+{
+	LARGE_INTEGER size;
+	std::string bytes;
+	DWORD got = 0;
+	bool ok;
+
+	HANDLE f = CreateFile(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+	if (f == INVALID_HANDLE_VALUE)
+		return false;
+	ok = GetFileSizeEx(f, &size) && size.QuadPart >= 0 && size.QuadPart <= MAXDWORD;
+	if (ok && size.QuadPart) {
+		bytes.resize((size_t)size.QuadPart);
+		ok = ReadFile(f, &bytes[0], (DWORD)size.QuadPart, &got, NULL) && got == size.QuadPart;
+	}
+	CloseHandle(f);
+	if (!ok)
+		return false;
+
+	DecodeIniText(bytes, text);
+	return true;
 }
 
 // Parse the ini file into data structures. We used to use the
@@ -663,13 +707,13 @@ static void ParseIniExcerpt(const wchar_t *excerpt)
 // it, make sure you delay calling it until after the log file has been opened!
 static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namespace)
 {
-	wifstream f(ini, ios::in, _SH_DENYNO);
-	if (!f) {
+	wstring text;
+
+	if (!ReadIniText(ini, &text)) {
 		LogOverlay(LOG_WARNING, "  Error opening %S\n", ini);
 		return;
 	}
-	f.imbue(std::locale(f.getloc(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::consume_header>));
-	ParseIniStream(&f, ini_namespace);
+	ParseIniText(text, ini_namespace);
 }
 
 static void ParseIniFile(const wchar_t *ini)
@@ -985,7 +1029,7 @@ static std::vector<std::wstring> GetIniStringMultipleKeys(const wchar_t *section
 
 	GetIniSection(&sv, section);
 	for (entry = sv->begin(); entry < sv->end(); entry++) {
-		if (!_wcsicmp(key, entry->first.c_str()))
+		if (!fast_wcsicmp(key, entry->first.c_str()))
 			ret.push_back(entry->second);
 	}
 
@@ -1032,7 +1076,7 @@ const wstring* GetIniWstring(const wchar_t* section, const wchar_t* key)
 inline std::wstring NormalizeString(const std::wstring& value)
 {
 	std::wstring normalized = value;
-	std::transform(normalized.begin(), normalized.end(), normalized.begin(), towlower);
+	std::transform(normalized.begin(), normalized.end(), normalized.begin(), fast_towlower);
 	return normalized;
 }
 
@@ -1356,12 +1400,12 @@ static int ParseEnum(wchar_t *str, wchar_t *prefix, wchar_t *names[], int names_
 
 	if (prefix) {
 		prefix_len = wcslen(prefix);
-		if (!_wcsnicmp(ptr, prefix, prefix_len))
+		if (!fast_wcsnicmp(ptr, prefix, prefix_len))
 			ptr += prefix_len;
 	}
 
 	for (i = first; i < names_len; i++) {
-		if (!_wcsicmp(ptr, names[i]))
+		if (!fast_wcsicmp(ptr, names[i]))
 			return i;
 	}
 
@@ -1699,7 +1743,7 @@ static void EnumeratePresetOverrideSections()
 
 		// Convert to lower case
 		preset_id = id;
-		std::transform(preset_id.begin(), preset_id.end(), preset_id.begin(), ::towlower);
+		std::transform(preset_id.begin(), preset_id.end(), preset_id.begin(), fast_towlower);
 
 		// Construct a preset in the global list:
 		presetOverrides[preset_id];
@@ -2050,7 +2094,7 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 	}
 
 	// Convert section name to lower case so our keys will be consistent in the unordered_map:
-	std::transform(resource_id.begin(), resource_id.end(), resource_id.begin(), ::towlower);
+	std::transform(resource_id.begin(), resource_id.end(), resource_id.begin(), fast_towlower);
 
 	// Empty Resource sections are valid (think of them as a
 	// sort of variable declaration), so explicitly construct a
@@ -2134,7 +2178,7 @@ static CustomResourcePool* ParseResourcePoolSection(const wchar_t* section_name)
 		return nullptr;
 
 	wstring pool_id = section_name;
-	std::transform(pool_id.begin(), pool_id.end(), pool_id.begin(), ::towlower);
+	std::transform(pool_id.begin(), pool_id.end(), pool_id.begin(), fast_towlower);
 
 	CustomResourcePool* pool = &customResourcePools[pool_id];
 
@@ -2187,7 +2231,6 @@ static void ParseResourceSections()
 	ClearDeferredBindFlags();
 	customResourcePools.clear();
 	customResources.clear();
-	ReleaseSharedFileResources();
 
 	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Pool"));
 	IniSections::iterator upper = prefix_upper_bound(ini_sections, wstring(L"Pool"));
@@ -2210,6 +2253,20 @@ static void ParseResourceSections()
 
 		ParseResourceSection(section_name.c_str(), nullptr);
 	}
+
+	// Resources loaded from files that are still in the config are kept
+	// until their sections load them again, which for a Mod that has not
+	// changed finds them unchanged too. The rest are released now:
+	std::unordered_set<wstring> lower_paths;
+	for (auto &i : customResources) {
+		if (i.second.filename.empty())
+			continue;
+		wstring lower(i.second.filename);
+		for (wchar_t &c : lower)
+			c = fast_towlower(c);
+		lower_paths.insert(std::move(lower));
+	}
+	RetainSharedFileResources(lower_paths);
 }
 
 static bool ParseCommandListLine(const wchar_t *ini_section,
@@ -2297,9 +2354,9 @@ static void ParseCommandList(const wchar_t *id,
 
 		// Convert key + val to lower case since ini files are supposed
 		// to be case insensitive:
-		std::transform(key->begin(), key->end(), key->begin(), ::towlower);
-		std::transform(val->begin(), val->end(), val->begin(), ::towlower);
-		std::transform(raw_line->begin(), raw_line->end(), raw_line->begin(), ::towlower);
+		std::transform(key->begin(), key->end(), key->begin(), fast_towlower);
+		std::transform(val->begin(), val->end(), val->begin(), fast_towlower);
+		std::transform(raw_line->begin(), raw_line->end(), raw_line->begin(), fast_towlower);
 
 		// Skip any whitelisted entries that are parsed elsewhere.
 		if (whitelist) {
@@ -2688,11 +2745,14 @@ static uint32_t hash_ini_section(uint32_t hash, const wstring *sname)
 	IniSectionVector *svec = NULL;
 	IniSectionVector::iterator entry;
 
-	hash = crc32c_hw(hash, sname->c_str(), sname->size());
+	// The lengths are in bytes. They used to be given in characters, which
+	// left the second half of every line out of the hash, so editing the
+	// end of a pattern or replacement kept the stale result in the cache:
+	hash = crc32c_hw(hash, sname->c_str(), sname->size() * sizeof(wchar_t));
 
 	GetIniSection(&svec, sname->c_str());
 	for (entry = svec->begin(); entry < svec->end(); entry++) {
-		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size());
+		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size() * sizeof(wchar_t));
 	}
 
 	return hash;
@@ -2921,7 +2981,7 @@ static void ParseShaderRegexSections()
 					continue;
 				break;
 			case 2:
-				if (!_wcsicmp(subsection_names[1].c_str(), L"Pattern")) {
+				if (!fast_wcsicmp(subsection_names[1].c_str(), L"Pattern")) {
 					// TODO: Allow multiple patterns per regex group, but not before
 					// our custom substitution logic is implemented to allow named capture
 					// groups matched in one pattern to be substituted into another, and
@@ -2931,14 +2991,14 @@ static void ParseShaderRegexSections()
 					// and substitutions to match everything they need in one go.
 					if (parse_shader_regex_section_pattern(section_id, &subsection_names[1], regex_group))
 						continue;
-				} else if (!_wcsicmp(subsection_names[1].c_str(), L"InsertDeclarations")) {
+				} else if (!fast_wcsicmp(subsection_names[1].c_str(), L"InsertDeclarations")) {
 					if (parse_shader_regex_section_declarations(section_id, &subsection_names[1], regex_group))
 						continue;
 				}
 				break;
 			case 3:
-				if (!_wcsnicmp(subsection_names[1].c_str(), L"Pattern", 7)
-				 && !_wcsicmp(subsection_names[2].c_str(), L"Replace")) {
+				if (!fast_wcsnicmp(subsection_names[1].c_str(), L"Pattern", 7)
+				 && !fast_wcsicmp(subsection_names[2].c_str(), L"Replace")) {
 					if (parse_shader_regex_section_replace(section_id, &subsection_names[1], regex_group))
 						continue;
 				}
@@ -3683,7 +3743,7 @@ static bool ParseBlendRenderTarget(
 		override = true;
 
 		// Special value to disable blending:
-		if (!_wcsicmp(setting, L"disable")) {
+		if (!fast_wcsicmp(setting, L"disable")) {
 			desc->BlendEnable = false;
 			mask->BlendEnable = 0;
 			return true;
@@ -4112,12 +4172,12 @@ static void ParseTopology(CustomShader *shader, const wchar_t *section)
 
 	prefix_len = wcslen(prefix);
 	ptr = val;
-	if (!_wcsnicmp(ptr, prefix, prefix_len))
+	if (!fast_wcsnicmp(ptr, prefix, prefix_len))
 		ptr += prefix_len;
 
 
 	for (i = 1; i < ARRAYSIZE(PrimitiveTopologies); i++) {
-		if (!_wcsicmp(ptr, PrimitiveTopologies[i].name)) {
+		if (!fast_wcsicmp(ptr, PrimitiveTopologies[i].name)) {
 			shader->topology = (D3D11_PRIMITIVE_TOPOLOGY)PrimitiveTopologies[i].val;
 			return;
 		}
@@ -4153,24 +4213,24 @@ static void ParseSamplerState(CustomShader *shader, const wchar_t *section)
 
 	if (GetIniStringAndLog(section, L"sampler", 0, setting, MAX_PATH))
 	{
-		if (!_wcsicmp(setting, L"null"))
+		if (!fast_wcsicmp(setting, L"null"))
 			return;
 
-		if (!_wcsicmp(setting, L"point_filter"))
+		if (!fast_wcsicmp(setting, L"point_filter"))
 		{
 			desc->Filter = D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT;
 			shader->sampler_override = 1;
 			return;
 		}
 
-		if (!_wcsicmp(setting, L"linear_filter"))
+		if (!fast_wcsicmp(setting, L"linear_filter"))
 		{
 			desc->Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
 			shader->sampler_override = 1;
 			return;
 		}
 
-		if (!_wcsicmp(setting, L"anisotropic_filter"))
+		if (!fast_wcsicmp(setting, L"anisotropic_filter"))
 		{
 			desc->Filter = D3D11_FILTER_COMPARISON_ANISOTROPIC;
 			desc->MaxAnisotropy = 16; // TODO: is 16 necessary or maybe it should be provided by the config ini?
@@ -4226,7 +4286,7 @@ static void _EnumerateCustomShaderSections(IniSections::iterator lower, IniSecti
 		// Convert section name to lower case so our keys will be
 		// consistent in the unordered_map:
 		shader_id = i->first;
-		std::transform(shader_id.begin(), shader_id.end(), shader_id.begin(), ::towlower);
+		std::transform(shader_id.begin(), shader_id.end(), shader_id.begin(), fast_towlower);
 
 		// Construct a custom shader in the global list:
 		customShaders[shader_id];
@@ -4326,7 +4386,7 @@ static void _EnumerateExplicitCommandListSections(IniSections::iterator lower, I
 		// Convert section name to lower case so our keys will be
 		// consistent in the unordered_map:
 		section_id = i->first;
-		std::transform(section_id.begin(), section_id.end(), section_id.begin(), ::towlower);
+		std::transform(section_id.begin(), section_id.end(), section_id.begin(), fast_towlower);
 
 		// Construct an explicit command list section in the global list:
 		explicitCommandListSections[section_id];

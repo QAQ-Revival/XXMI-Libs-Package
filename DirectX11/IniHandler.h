@@ -29,9 +29,9 @@ struct IniLine {
 	// to resolve references within the namespace:
 	wstring ini_namespace;
 
-	IniLine(wstring &key, wstring &val, wstring &line, const wstring &ini_namespace) :
-		first(key),
-		second(val),
+	IniLine(wstring &&key, wstring &&val, const wstring &line, const wstring &ini_namespace) :
+		first(std::move(key)),
+		second(std::move(val)),
 		raw_line(line),
 		ini_namespace(ini_namespace)
 	{}

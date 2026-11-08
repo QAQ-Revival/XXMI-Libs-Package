@@ -44,6 +44,7 @@ namespace Profiling {
 	unsigned views_cleared;
 	unsigned resources_created;
 	unsigned resources_shared;
+	unsigned resources_retained;
 	unsigned resource_pool_swaps;
 	unsigned max_copies_per_frame_exceeded;
 	unsigned injected_draw_calls;
@@ -297,6 +298,7 @@ static void update_txt_summary(LARGE_INTEGER collection_duration, LARGE_INTEGER 
 			    L"                Resources cleared: %4u/frame (Cost saving in some circumstances, e.g. SLI)\n"
 			    L"            Resources [re]created: %4u       (High cost)\n"
 			    L"   Resources shared between files: %4u       (Cost saving)\n"
+			    L"   Resources kept through reloads: %4u       (Cost saving)\n"
 			    L"              Resource pool swaps: %4u/frame (Low cost)\n"
 			    L"    max_copies_per_frame exceeded: %4u/frame (Cost saving)\n"
 			    L"     Injected draw/dispatch calls: %4u/frame\n"
@@ -312,6 +314,7 @@ static void update_txt_summary(LARGE_INTEGER collection_duration, LARGE_INTEGER 
 			    Profiling::views_cleared / frames,
 			    Profiling::resources_created,
 			    Profiling::resources_shared,
+			    Profiling::resources_retained,
 			    Profiling::resource_pool_swaps / frames,
 			    Profiling::max_copies_per_frame_exceeded / frames,
 			    Profiling::injected_draw_calls / frames,
@@ -492,6 +495,7 @@ void Profiling::clear()
 	views_cleared = 0;
 	resources_created = 0;
 	resources_shared = 0;
+	resources_retained = 0;
 	resource_pool_swaps = 0;
 	max_copies_per_frame_exceeded = 0;
 	injected_draw_calls = 0;
