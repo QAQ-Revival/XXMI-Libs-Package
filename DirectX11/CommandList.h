@@ -28,6 +28,7 @@ class HackerContext;
 enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
 class MappedFile;
+struct FileIdentity;
 
 struct InputLayoutElementOverride {
 	struct Match {
@@ -630,11 +631,14 @@ public:
 private:
 	bool HasPNGsRGBChunk(const uint8_t *data, size_t size);
 	DirectX::WIC_LOADER_FLAGS GetWICFlags(const uint8_t *data, size_t size);
+	bool WICFlagsWithoutData(DirectX::WIC_LOADER_FLAGS *flags);
 	// bind_flags are the ones the resource is actually created with, which
 	// for buffers are only known once OverrideBufferDesc() has run:
 	bool ShareableFromFile(D3D11_BIND_FLAG effective_bind_flags);
 	void LoadFromFile(ID3D11Device *mOrigDevice);
 	void LoadBufferFromFile(ID3D11Device *mOrigDevice);
+	void BufferDescForData(D3D11_BUFFER_DESC *desc, DWORD size);
+	bool RetainedBufferFromFile(ID3D11Device *mOrigDevice, const FileIdentity &identity);
 	// share_file is the mapped file the data came from when its GPU
 	// resource may be shared with other sections loading identical data:
 	void SubstantiateBuffer(ID3D11Device *mOrigDevice, const void *data, DWORD size, const MappedFile *share_file);

@@ -1411,6 +1411,8 @@ void CleanupShaderMaps(ID3D11DeviceChild *handle)
 			LogInfo("Shader handle %p reused, found in mReloadedShaders\n", handle);
 			if (i->second.replacement)
 				i->second.replacement->Release();
+			if (i->second.regex_shader)
+				i->second.regex_shader->Release();
 			if (i->second.byteCode)
 				i->second.byteCode->Release();
 			if (i->second.linkage)

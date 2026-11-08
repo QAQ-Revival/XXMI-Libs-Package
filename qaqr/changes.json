@@ -9,7 +9,11 @@
     "Preserve legacy REF view end-boundary behavior for QAQR compatibility",
     "Distinguish compatible resource reuse from creation failure so repeated buffer and texture copies keep executing",
     "Convert structured compute output to valid plain vertex/index buffers for ShapeKey menus, preserving out-of-band stride and failure guards",
-    "Share one GPU resource between [Resource] sections whose files are identical (share_duplicate_resources, default on; written, render target, UAV and pool resources keep their own copy), ported from the Vulkan branch"
+    "Share one GPU resource between [Resource] sections whose files are identical (share_duplicate_resources, default on; written, render target, UAV and pool resources keep their own copy), ported from the Vulkan branch",
+    "A config reload keeps the GPU resource of every [Resource] file that is unchanged (same file ID, size, write and change time) and loaded the same way, instead of reading and uploading every Mod again; resources of renamed-away, changed or unused files are released",
+    "A config reload with unchanged ShaderRegex sections relinks each shader's matched groups and reuses its patched shader instead of reading the cache files and creating it again",
+    "The ShaderRegex cache hash covers whole lines (lengths were in characters, not bytes), so editing the end of a pattern or replacement no longer keeps a stale cached patch",
+    "Faster config parsing with identical results: ini files read in one go with the old stream's decoding rules, ASCII case folding without per-character locale lookups, and the command list optimiser collapsing else-if chains in one pass"
   ],
   "validation": "Isolated D3D11 WARP processes; no game is launched or injected",
   "compatibleRuntimeHashes": [

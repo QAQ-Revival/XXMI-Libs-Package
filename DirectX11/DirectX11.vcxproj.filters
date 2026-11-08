@@ -57,6 +57,7 @@
     <ClInclude Include="CommandList.h" />
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="ResourceLoading.h" />
+    <ClInclude Include="IniText.h" />
     <ClInclude Include="HookedContext.h" />
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="..\shader.h" />

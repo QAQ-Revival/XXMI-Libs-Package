@@ -27,6 +27,46 @@
 #endif // MIGOTO_DX
 
 
+// The CRT's towlower and _wcsicmp look up the locale again for every
+// character, which made them a large part of parsing a big config. ASCII is
+// lowered the same way in the "C" locale and in the en_US.UTF-8 locale the
+// config is parsed in, so only the other characters still go through the CRT
+// and every result is the same as before:
+inline wchar_t fast_towlower(wchar_t c)
+{
+	if (c < 0x80)
+		return (c >= L'A' && c <= L'Z') ? (wchar_t)(c + (L'a' - L'A')) : c;
+	return (wchar_t)towlower(c);
+}
+
+inline int fast_wcsicmp(const wchar_t *a, const wchar_t *b)
+{
+	int f, l;
+
+	do {
+		f = fast_towlower(*a++);
+		l = fast_towlower(*b++);
+	} while (f && f == l);
+
+	return f - l;
+}
+
+inline int fast_wcsnicmp(const wchar_t *a, const wchar_t *b, size_t count)
+{
+	int f, l;
+
+	if (!count)
+		return 0;
+
+	do {
+		f = fast_towlower(*a++);
+		l = fast_towlower(*b++);
+	} while (--count && f && f == l);
+
+	return f - l;
+}
+
+
 // Sets the threshold for warning about IniParams size. The larger IniParams is
 // the more CPU -> GPU bandwidth we will require to update it, so we want to
 // discourage modders from picking arbitrarily high IniParams.
@@ -214,7 +254,7 @@ static DECLSPEC_NORETURN void DoubleBeepExit()
 
 static int _autoicmp(const wchar_t *s1, const wchar_t *s2)
 {
-	return _wcsicmp(s1, s2);
+	return fast_wcsicmp(s1, s2);
 }
 static int _autoicmp(const char *s1, const char *s2)
 {
@@ -243,7 +283,7 @@ template <class T1, class T2>
 static T2 lookup_enum_val(struct EnumName_t<T1, T2> *enum_names, T1 name, size_t len, T2 default, bool *found=NULL)
 {
 	for (; enum_names->name; enum_names++) {
-		if (!_wcsnicmp(name, enum_names->name, len)) {
+		if (!fast_wcsnicmp(name, enum_names->name, len)) {
 			if (found)
 				*found = true;
 			return enum_names->val;
@@ -958,7 +998,7 @@ static bool ParseIniParamName(const wchar_t *name, int *idx, float DirectX::XMFL
 		return false;
 	}
 
-	switch (towlower(component_chr)) {
+	switch (fast_towlower(component_chr)) {
 		case L'x':
 			*component = &DirectX::XMFLOAT4::x;
 			return true;

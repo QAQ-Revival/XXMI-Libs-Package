@@ -532,6 +532,33 @@ void HackerContext::ProcessShaderOverride(ShaderOverride *shaderOverride, bool i
 // ShaderFixes, either at shader creation time, or dynamically by the
 // mReloadedShaders map - user replaced shaders should always take priority
 // over automatically replaced shaders.
+
+static void ForgetShaderRegexResult(OriginalShaderInfo *info)
+{
+	info->regex_result_valid = false;
+	info->regex_match_ids.clear();
+	info->regex_tagline.clear();
+	if (info->regex_shader)
+		info->regex_shader->Release();
+	info->regex_shader = NULL;
+}
+
+// Remembers the outcome of a complete analysis, or of a complete read of the
+// cache, together with the hash of the ShaderRegex sections it is valid for:
+static void KeepShaderRegexResult(OriginalShaderInfo *info, const vector<uint32_t> &linked_ids,
+		ID3D11DeviceChild *patched_shader, const wstring &tagline)
+{
+	ForgetShaderRegexResult(info);
+	info->regex_result_valid = true;
+	info->regex_result_hash = shader_regex_hash;
+	info->regex_match_ids = linked_ids;
+	info->regex_tagline = tagline;
+	if (patched_shader) {
+		patched_shader->AddRef();
+		info->regex_shader = patched_shader;
+	}
+}
+
 template <class ID3D11Shader,
 	void (__stdcall ID3D11DeviceContext::*GetShaderVS2013BUGWORKAROUND)(ID3D11Shader**, ID3D11ClassInstance**, UINT*),
 	void (__stdcall ID3D11DeviceContext::*SetShaderVS2013BUGWORKAROUND)(ID3D11Shader*, ID3D11ClassInstance*const*, UINT),
@@ -551,6 +578,7 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 	wstring tagline(L"//");
 	vector<byte> patched_bytecode;
 	vector<char> asm_vector;
+	vector<uint32_t> linked_ids;
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
@@ -567,18 +595,38 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 	// (until config reload) regardless of whether we patch it or not:
 	orig_info->deferred_replacement_processed = true;
 
-	switch (load_shader_regex_cache(hash, shader_type, &patched_bytecode, &tagline)) {
+	// The ShaderRegex sections are unchanged since this shader was last
+	// analysed, as after a reload that only enabled or changed Mods without
+	// any: link the same groups and put the same patched shader back,
+	// instead of reading the cache files and creating the shader again
+	// (thousands of them after every reload in a large setup):
+	if (orig_info->regex_result_valid && orig_info->regex_result_hash == shader_regex_hash
+			&& link_shader_regex_group_ids(hash, orig_info->regex_match_ids)) {
+		if (!orig_info->regex_shader)
+			goto out_drop;
+		patched_shader = (ID3D11Shader*)orig_info->regex_shader;
+		patched_shader->AddRef();
+		tagline = orig_info->regex_tagline;
+		goto replace;
+	}
+	ForgetShaderRegexResult(orig_info);
+
+	switch (load_shader_regex_cache(hash, shader_type, &patched_bytecode, &tagline, &linked_ids)) {
 	case ShaderRegexCache::NO_MATCH:
 		LogInfo("%S %016I64x has cached ShaderRegex miss\n", shader_type, hash);
+		KeepShaderRegexResult(orig_info, linked_ids, NULL, tagline);
 		goto out_drop;
 	case ShaderRegexCache::MATCH:
 		LogInfo("Loaded %S %016I64x command list from ShaderRegex cache\n", shader_type, hash);
+		KeepShaderRegexResult(orig_info, linked_ids, NULL, tagline);
 		goto out_drop;
 	case ShaderRegexCache::PATCH:
 		LogInfo("Loaded %S %016I64x bytecode from ShaderRegex cache\n", shader_type, hash);
 		break;
 	case ShaderRegexCache::NO_CACHE:
 		LogInfo("Performing deferred shader analysis on %S %016I64x...\n", shader_type, hash);
+		// Groups a cache file linked before turning out incomplete:
+		linked_ids.clear();
 
 		// Detect shader model
 		auto it = G->mShaderModelCache.find(hash);
@@ -602,11 +650,12 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		bool decompilation_required = false;
 
 		// Process ShaderRegex sections that don't require bytecode decompilation.
-		link_shader_regex_groups_without_patterns(shader_type, &orig_info->shaderModel, hash, &decompilation_required);
+		link_shader_regex_groups_without_patterns(shader_type, &orig_info->shaderModel, hash, &decompilation_required, &linked_ids);
 
 		// Skip disassemble entirely if there are no matching ShaderRegex with Patterns found.
 		if (!decompilation_required) {
 			LogInfo("%S %016I64x disassembly skipped: no matching ShaderRegex with Patterns found for %s.\n", shader_type, hash, orig_info->shaderModel.c_str());
+			KeepShaderRegexResult(orig_info, linked_ids, NULL, tagline);
 			goto out_drop;
 		}
 
@@ -629,7 +678,7 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 
 		// Apply patches from ShaderRegex with Patterns (and Templates).
 		try {
-			patch_regex = apply_shader_regex_groups(&asm_text, shader_type, &orig_info->shaderModel, hash, &tagline);
+			patch_regex = apply_shader_regex_groups(&asm_text, shader_type, &orig_info->shaderModel, hash, &tagline, &linked_ids);
 		} catch (...) {
 			LogInfo("    *** Exception while patching shader\n");
 			goto out_drop;
@@ -637,6 +686,7 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 
 		if (!patch_regex) {
 			LogInfo("Patch did not apply\n");
+			KeepShaderRegexResult(orig_info, linked_ids, NULL, tagline);
 			goto out_drop;
 		}
 
@@ -676,7 +726,9 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		LogInfo("    *** Creating replacement shader failed\n");
 		goto out_drop;
 	}
+	KeepShaderRegexResult(orig_info, linked_ids, patched_shader, tagline);
 
+replace:
 	// Update replacement map so we don't have to repeat this process.
 	// Not updating the bytecode in the replaced shader map - we do that
 	// elsewhere, but I think that is a bug. Need to untangle that first.

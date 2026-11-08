@@ -68,7 +68,7 @@ void Override::ParseIniSection(LPCWSTR section)
 	if (GetIniStringAndLog(section, L"condition", 0, buf, MAX_PATH)) {
 		wstring sbuf(buf);
 		// Expressions are case insensitive:
-		std::transform(sbuf.begin(), sbuf.end(), sbuf.begin(), ::towlower);
+		std::transform(sbuf.begin(), sbuf.end(), sbuf.begin(), fast_towlower);
 
 		if (!condition.parse(&sbuf, &ini_namespace, NULL)) {
 			LogOverlayW(LOG_WARNING, L"Invalid condition = \"%ls\"\n - [%ls] @ [%ls]\n", buf, section, ini_namespace.c_str());
@@ -200,7 +200,7 @@ struct KeyOverrideCycleParam
 		get_section_namespace(section, &ini_namespace);
 
 		// Expressions are case insensitive:
-		std::transform(scur.begin(), scur.end(), scur.begin(), ::towlower);
+		std::transform(scur.begin(), scur.end(), scur.begin(), fast_towlower);
 
 		if (!expression->parse(&scur, &ini_namespace, NULL)) {
 			LogOverlayW(LOG_WARNING, L"Invalid condition=\"%S\"\n - [%ls] @ [%ls]\n", cur.c_str(), section, ini_namespace.c_str());

@@ -127,6 +127,17 @@ struct OriginalShaderInfo
 	bool deferred_replacement_candidate;
 	bool deferred_replacement_processed;
 	std::wstring infoText;
+
+	// The last ShaderRegex result for this shader, kept across config
+	// reloads. While the ShaderRegex sections hash the same the groups are
+	// linked again from it and the patched shader is reused, without
+	// reading the cache files or creating the shader again:
+	bool regex_result_valid = false;
+	uint32_t regex_result_hash = 0;
+	std::vector<uint32_t> regex_match_ids;
+	// Holds a reference of its own, NULL when nothing was patched:
+	ID3D11DeviceChild* regex_shader = nullptr;
+	std::wstring regex_tagline;
 };
 
 // Call this after any CreateXXXShader call to ensure that all references to
