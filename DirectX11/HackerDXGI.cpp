@@ -130,6 +130,22 @@ void InstallSetWindowPosHook()
 
 // -----------------------------------------------------------------------------
 
+// Only the swap chain of the game's window may set the resolution Mods read
+// as res_width and res_height. Other modules in the process can resize swap
+// chains of their own through the same hooked factory; their sizes are not
+// the game's. G->hWnd is the window of the last swap chain made for one, and
+// is not known for CoreWindow swap chains, which keep the old behaviour.
+static bool is_game_swap_chain(IDXGISwapChain *swap_chain)
+{
+	DXGI_SWAP_CHAIN_DESC desc;
+
+	if (!G->hWnd)
+		return true;
+	return SUCCEEDED(swap_chain->GetDesc(&desc)) && desc.OutputWindow == G->hWnd;
+}
+
+// -----------------------------------------------------------------------------
+
 // In the Elite Dangerous case, they Release the HackerContext objects before creating the 
 // swap chain.  That causes problems, because we are not expecting anyone to get here without
 // having a valid context.  They later call GetImmediateContext, which will generate a wrapped
@@ -711,7 +727,7 @@ STDMETHODIMP HackerSwapChain::ResizeBuffers(THIS_
 {
 	LogInfo("HackerSwapChain::ResizeBuffers(%s@%p) called\n", type_name(this), this);
 
-	if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN)
+	if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN && is_game_swap_chain(mOrigSwapChain1))
 	{
 		G->mResolutionInfo.width = Width;
 		G->mResolutionInfo.height = Height;
@@ -1208,7 +1224,7 @@ STDMETHODIMP HackerUpscalingSwapChain::ResizeBuffers(THIS_
 	G->GAME_INTERNAL_WIDTH = Width;
 	G->GAME_INTERNAL_HEIGHT = Height;
 
-	if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN)
+	if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN && is_game_swap_chain(mOrigSwapChain1))
 	{
 		G->mResolutionInfo.width = Width;
 		G->mResolutionInfo.height = Height;

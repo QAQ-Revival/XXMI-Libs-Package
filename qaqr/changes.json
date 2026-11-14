@@ -13,7 +13,8 @@
     "A config reload keeps the GPU resource of every [Resource] file that is unchanged (same file ID, size, write and change time) and loaded the same way, instead of reading and uploading every Mod again; resources of renamed-away, changed or unused files are released",
     "A config reload with unchanged ShaderRegex sections relinks each shader's matched groups and reuses its patched shader instead of reading the cache files and creating it again",
     "The ShaderRegex cache hash covers whole lines (lengths were in characters, not bytes), so editing the end of a pattern or replacement no longer keeps a stale cached patch",
-    "Faster config parsing with identical results: ini files read in one go with the old stream's decoding rules, ASCII case folding without per-character locale lookups, and the command list optimiser collapsing else-if chains in one pass"
+    "Faster config parsing with identical results: ini files read in one go with the old stream's decoding rules, ASCII case folding without per-character locale lookups, and the command list optimiser collapsing else-if chains in one pass",
+    "A DirectComposition swap chain (no window, such as EFF's Ins panel) is handed back unwrapped with no display overrides, so DirectComposition can take it, and only the swap chain of the game's window sets res_width and res_height"
   ],
   "validation": "Isolated D3D11 WARP processes; no game is launched or injected",
   "compatibleRuntimeHashes": [

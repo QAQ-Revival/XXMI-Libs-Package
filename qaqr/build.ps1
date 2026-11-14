@@ -55,6 +55,16 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Ini text probe build failed' }
             & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/reload.cpp') /Fe:reload.exe /link d3dcompiler.lib user32.lib
             if ($LASTEXITCODE -ne 0) { throw 'Reload probe build failed' }
+            & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/swapchain.cpp') /Fe:swapchain.exe /link d3d11.lib dxgi.lib dcomp.lib user32.lib
+            if ($LASTEXITCODE -ne 0) { throw 'Swap chain probe build failed' }
+            # Only the Vulkan runtime looks for the Vulkan loader
+            $taskVkLoader = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'tests/vkloader.cpp')
+            if ($taskVkLoader) {
+                & cl.exe /nologo /O2 /MT /LD (Join-Path $PSScriptRoot 'tests/vkproxy.c') /Fe:vkproxy.dll
+                if ($LASTEXITCODE -ne 0) { throw 'Vulkan loader proxy build failed' }
+                & cl.exe /nologo /EHsc /std:c++17 /O2 /MT (Join-Path $PSScriptRoot 'tests/vkloader.cpp') /Fe:vkloader.exe /link d3d11.lib
+                if ($LASTEXITCODE -ne 0) { throw 'Vulkan loader probe build failed' }
+            }
             & ./initext.exe
             if ($LASTEXITCODE -ne 0) { throw 'Ini text decoding differs from the stream it replaced' }
             $taskDll = Join-Path $taskWork 'd3d11.dll'
@@ -66,6 +76,14 @@ try {
             foreach ($case in 0..14) {
                 & ./region.exe $taskDll patched $case $taskShader
                 if ($LASTEXITCODE -ne 0) { throw "COPY/REF regression failed: $case" }
+            }
+            foreach ($mode in @('full','nocomposition')) {
+                & ./swapchain.exe $taskDll $mode
+                if ($LASTEXITCODE -ne 0) { throw "Swap chain that is not the game's was taken for it: $mode" }
+            }
+            if ($taskVkLoader) {
+                & ./vkloader.exe $taskDll (Join-Path $taskWork 'vkproxy.dll')
+                if ($LASTEXITCODE -ne 0) { throw 'Vulkan loader behind a forwarding proxy was not hooked' }
             }
             foreach ($mode in @('on','off')) {
                 & ./share.exe $taskDll $mode
