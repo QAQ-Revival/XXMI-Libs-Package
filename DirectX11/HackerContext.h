@@ -148,6 +148,8 @@ private:
 	HackerInputLayout* mOriginalInputLayout;
 	HackerInputLayout* mOverrideInputLayout;
 
+	InitialTexturesSnapshot mInitialTexturesSnapshot;
+
 	// Used for deny_cpu_read, track_texture_updates and constant buffer matching
 	typedef std::unordered_map<ID3D11Resource*, std::unordered_map<UINT, MappedResourceInfo>> MappedResources;
 	MappedResources mMappedResources;
@@ -259,6 +261,7 @@ public:
 
 	unsigned GetDrawNumber() const { return draw_number; };
 	unsigned GetDispatchNumber() const { return dispatch_number; };
+	unsigned GetCallNumber() const { return draw_number + dispatch_number; };
 	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; };
 
 	ID3D11Buffer* GetReadbackBuffer(UINT size);
@@ -266,6 +269,8 @@ public:
 	void DeferInputLayoutOverride(HackerInputLayout* pInputLayout);
 	void OverrideInputLayout();
 	void RestoreInputLayout();
+
+	InitialTexturesSnapshot& GetInitialTexturesSnapshot() { return mInitialTexturesSnapshot; }
 
 	HRESULT ComputeDHash(ID3D11Texture2D* texture, UINT mipLevel, DXGI_FORMAT srvFormat, uint64_t& outHash);
 
