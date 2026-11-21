@@ -1,0 +1,24 @@
+name: QAQR Component
+
+# Publishes this fork's QAQ-Revival package as a release whenever its source moves, so the manager
+# can install a fix without waiting for its own release. The file is the same in every fork: the
+# shared workflow looks the repository up and does nothing for one that publishes no component.
+on:
+  push:
+    branches: [master, main]
+    # The build number counts from the latest upstream version tag, which can arrive after its commit.
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: qaqr-component
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      actions: write
+    uses: QAQ-Revival/QAQ-Revival/.github/workflows/component-release.yml@main

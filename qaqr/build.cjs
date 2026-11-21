@@ -27,5 +27,20 @@ function build({ output = path.join(root, 'build/component'), work = path.join(r
   fs.writeFileSync(path.join(output, 'component.json'), JSON.stringify({ source: 'https://github.com/QAQ-Revival/XXMI-Libs-Package', sourceCommit: git(['rev-parse', 'HEAD']), activityProtocol: 1, compatibleRuntimeHashes: require("./changes.json").compatibleRuntimeHashes, validation: 'D3D11 WARP', gameRuntimeValidated: false, files }, null, 2));
   return output;
 }
-if (require.main === module) build({ verifyOnly: process.argv.includes('--verify-only') });
-module.exports = { build };
+// A package that does not number itself takes the version the build gave the DLL. Added after packaging,
+// so the lines above stay the ones the Vulkan fork merges without a conflict.
+function numbered(options = {}) {
+  const output = build(options);
+  if (!output) return output;
+  const file = path.join(output, 'component.json'), manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!manifest.version) {
+    const header = fs.readFileSync(path.join(path.resolve(options.work || path.join(root, 'build/qaqr')), 'version.generated.h'), 'utf8');
+    const parts = ['MAJOR', 'MINOR', 'REVISION', 'BUILD'].map(name => new RegExp(`^#define VERSION_${name}\\s+(\\d+)\\s*$`, 'm').exec(header)?.[1]);
+    if (parts.some(part => !part)) throw Error('Cannot read the version the runtime was built with');
+    const { files, ...rest } = manifest;
+    fs.writeFileSync(file, JSON.stringify({ ...rest, version: parts.join('.'), files }, null, 2));
+  }
+  return output;
+}
+if (require.main === module) numbered({ verifyOnly: process.argv.includes('--verify-only') });
+module.exports = { build: numbered };
