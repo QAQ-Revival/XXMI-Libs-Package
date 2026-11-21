@@ -1,6 +1,5 @@
 {
   "upstream": "SpectrumQT/XXMI-Libs-Package",
-  "reviewedUpstream": "a990f65449393cb5aa3331aa0f5c0c5a51fdac69",
   "activityProtocol": 1,
   "changes": [
     "Net-change persistence journal and atomic compaction on reload",
