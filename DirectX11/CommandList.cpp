@@ -7139,13 +7139,24 @@ bool CustomResource::WICFlagsWithoutData(DirectX::WIC_LOADER_FLAGS *flags)
 }
 
 static void TextureShareKey(SharedResourceKey *key, ID3D11Device *device, D3D11_BIND_FLAG bind_flags,
-		D3D11_RESOURCE_MISC_FLAG misc_flags, bool dds, bool force_srgb, DirectX::WIC_LOADER_FLAGS wic_flags)
+		D3D11_RESOURCE_MISC_FLAG misc_flags, bool dds, DirectX::DDS_LOADER_FLAGS dds_flags, DirectX::WIC_LOADER_FLAGS wic_flags)
 {
 	key->device = device;
 	key->loader = dds ? SharedResourceLoader::DDS : SharedResourceLoader::WIC;
 	key->bind_flags = bind_flags;
 	key->misc_flags = misc_flags;
-	key->load_flags = dds ? force_srgb : wic_flags;
+	key->load_flags = dds ? static_cast<UINT>(dds_flags) : static_cast<UINT>(wic_flags);
+}
+
+DirectX::DDS_LOADER_FLAGS CustomResource::GetDDSFlags()
+{
+	switch (override_color_space) {
+	case CustomColorSpace::LINEAR:
+	case CustomColorSpace::SRGB:
+		return (DirectX::DDS_LOADER_FLAGS)override_color_space;
+	default:
+		return DirectX::DDS_LOADER_FLAGS::DDS_LOADER_DEFAULT;
+	}
 }
 
 void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
@@ -7153,7 +7164,8 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 	SharedResourceKey share_key;
 	DirectX::WIC_LOADER_FLAGS wic_flags = DirectX::WIC_LOADER_DEFAULT;
 	FileIdentity identity;
-	bool dds, share, force_srgb, has_identity = false;
+	bool dds, share, has_identity = false;
+	DirectX::DDS_LOADER_FLAGS dds_flags;
 	size_t dot;
 	HRESULT hr;
 
@@ -7192,7 +7204,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 
 	dot = filename.rfind(L'.');
 	dds = dot != wstring::npos && !_wcsicmp(filename.c_str() + dot, L".dds");
-	force_srgb = override_color_space == CustomColorSpace::SRGB;
+	dds_flags = GetDDSFlags();
 	share = ShareableFromFile(bind_flags);
 
 	// The texture kept from before the config was reloaded, if this file
@@ -7200,7 +7212,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 	// whose color space is detected from its contents is not known to load
 	// the same way until it has been read, so that one is read first:
 	if (share && (dds || WICFlagsWithoutData(&wic_flags)) && GetFileIdentity(filename.c_str(), &identity)) {
-		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, force_srgb, wic_flags);
+		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, dds_flags, wic_flags);
 		resource = FindRetainedFileResource(share_key, filename, identity);
 		if (resource) {
 			LogInfoW(L"Kept the texture loaded from unchanged %s before the reload\n", filename.c_str());
@@ -7225,7 +7237,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 
 	if (share) {
 		has_identity = file.identity(&identity);
-		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, force_srgb, wic_flags);
+		TextureShareKey(&share_key, mOrigDevice1, bind_flags, misc_flags, dds, dds_flags, wic_flags);
 		resource = FindSharedFileResource(share_key, file.data, file.size,
 				&filename, has_identity ? &identity : nullptr);
 		if (resource) {
@@ -7242,7 +7254,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 		hr = DirectX::CreateDDSTextureFromMemoryEx(mOrigDevice1,
 				file.data, file.size, 0,
 				D3D11_USAGE_DEFAULT, bind_flags, 0, misc_flags,
-				force_srgb, &resource, NULL, NULL);
+				dds_flags, &resource, NULL, NULL);
 	} else {
 		LogInfoW(L"Loading custom resource %s as WIC, bind_flags=0x%03x\n", filename.c_str(), bind_flags);
 		hr = DirectX::CreateWICTextureFromMemoryEx(mOrigDevice1,

@@ -9,6 +9,7 @@
 #include <DirectXMath.h>
 #include <util.h>
 #include <WICTextureLoader.h>
+#include <DDSTextureLoader.h>
 
 #include "DrawCallInfo.h"
 #include "ResourceHash.h"
@@ -683,6 +684,7 @@ private:
 	// bind_flags are the ones the resource is actually created with, which
 	// for buffers are only known once OverrideBufferDesc() has run:
 	bool ShareableFromFile(D3D11_BIND_FLAG effective_bind_flags);
+	DirectX::DDS_LOADER_FLAGS GetDDSFlags();
 	void LoadFromFile(ID3D11Device *mOrigDevice);
 	void LoadBufferFromFile(ID3D11Device *mOrigDevice);
 	void BufferDescForData(D3D11_BUFFER_DESC *desc, DWORD size);

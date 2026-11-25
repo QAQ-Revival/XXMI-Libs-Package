@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "QaqrRuntime.inc"
+#include "ReShadeRuntime.hpp"
 
 #define INI_FILENAME L"d3dx.ini"
 
@@ -4658,6 +4659,9 @@ void LoadConfigFile()
 	}
 
 	gLogDebug = gLogVerbosity == LogVerbosity::DEBUG;
+
+	if (gLogDebug)
+		InitializeHooksLog();
 
 	ParseIniFile(iniFile);
 	InsertBuiltInIniSections();
